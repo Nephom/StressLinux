@@ -1,4 +1,3 @@
-// cpu/cpu.go
 package cpu
 
 import (

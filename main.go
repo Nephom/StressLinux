@@ -4,10 +4,13 @@ import (
         "flag"
         "fmt"
         "os"
+        "os/exec"
         "runtime"
         "strings"
         "sync"
+	"syscall"
         "time"
+	"path/filepath"
 
         cfg "stress/config"
         "stress/cpu"
@@ -15,6 +18,10 @@ import (
         "stress/memory"
         "stress/rawdisk"
         "stress/utils"
+
+	gcpu "github.com/shirou/gopsutil/v4/cpu"
+	gdisk "github.com/shirou/gopsutil/v4/disk"
+	gmem "github.com/shirou/gopsutil/v4/mem"
 )
 
 type stringSliceFlag []string
@@ -28,6 +35,171 @@ func (i *stringSliceFlag) Set(value string) error {
     return nil
 }
 
+func getSystemInfo() {
+    // CPU 資訊
+    cpuInfo, err := gcpu.Info()
+    if err != nil || len(cpuInfo) == 0 {
+        fmt.Println("CPU Info: Unable to retrieve CPU information")
+    } else {
+        fmt.Printf("CPU Info: Model: %s, Cores: %d, Frequency: %.2f MHz\n",
+            cpuInfo[0].ModelName, cpuInfo[0].Cores, cpuInfo[0].Mhz)
+    }
+
+    // 記憶體資訊
+    vm, err := gmem.VirtualMemory()
+    if err != nil {
+        fmt.Println("Memory Info: Unable to retrieve memory information")
+    } else {
+        availablePercent := float64(vm.Available) / float64(vm.Total) * 100
+        stressPercent := availablePercent / 10.0
+        if stressPercent > 9.5 {
+            stressPercent = 9.5
+        }
+        fmt.Printf("Memory Info: Available for stress: %.1f%% (%.1f)\n", availablePercent, stressPercent)
+    }
+
+    // 系統分區資訊
+    partitions, err := gdisk.Partitions(true)
+    if err != nil {
+        fmt.Println("Disk Mount Points: Unable to retrieve mount points")
+        partitions = []gdisk.PartitionStat{}
+    }
+
+    // 檢測 ZFS Pool 使用的實體裝置
+    zfsDisks := make(map[string]bool)
+    zfsMounts := make(map[string]bool)
+
+    if out, err := exec.Command("zpool", "status").Output(); err == nil {
+        lines := strings.Split(string(out), "\n")
+        for _, line := range lines {
+            fields := strings.Fields(line)
+            if len(fields) > 0 {
+                dev := fields[0]
+                if strings.HasPrefix(dev, "/dev/") || strings.HasPrefix(dev, "ata-") || strings.HasPrefix(dev, "wwn-") {
+                    fullPath := dev
+                    if !strings.HasPrefix(dev, "/dev/") {
+                        fullPath = "/dev/disk/by-id/" + dev
+                    }
+                    resolved, err := filepath.EvalSymlinks(fullPath)
+                    if err == nil {
+                        baseDevice := strings.TrimRight(resolved, "0123456789")
+                        zfsDisks[baseDevice] = true
+                    }
+                }
+            }
+        }
+    } else {
+        fmt.Println("ZFS Info: Unable to retrieve zpool status")
+    }
+
+    for _, p := range partitions {
+        if strings.ToLower(p.Fstype) == "zfs" {
+            zfsMounts[p.Mountpoint] = true
+        }
+    }
+
+    // 檢測 LVM
+    lvmDisks := make(map[string]bool)
+    lvmMounts := make(map[string]bool)
+    for _, p := range partitions {
+        if strings.HasPrefix(p.Device, "/dev/mapper/") {
+            lvmMounts[p.Mountpoint] = true
+            if strings.HasPrefix(p.Device, "/dev/dm-") {
+                lvmDisks["/dev/sdb"] = true // TODO: 動態解析 dm 對應的實體裝置
+            }
+        }
+    }
+
+    // 檢測 MD RAID
+    mdDisks := make(map[string]bool)
+    mdMounts := make(map[string]bool)
+    if mdstat, err := os.ReadFile("/proc/mdstat"); err == nil {
+        lines := strings.Split(string(mdstat), "\n")
+        for _, line := range lines {
+            if strings.Contains(line, "md") && strings.Contains(line, ":") {
+                parts := strings.Fields(line)
+                for _, part := range parts {
+                    if strings.HasPrefix(part, "sd") || strings.HasPrefix(part, "nvme") {
+                        dev := "/dev/" + strings.TrimSuffix(part, "[0-9]")
+                        mdDisks[dev] = true
+                    }
+                }
+            }
+        }
+        for _, p := range partitions {
+            if strings.HasPrefix(p.Device, "/dev/md") {
+                mdMounts[p.Mountpoint] = true
+            }
+        }
+    }
+
+    // 可用掛載點
+    nonSystemMounts := []string{}
+    for _, p := range partitions {
+        if strings.HasPrefix(p.Mountpoint, "/boot") ||
+            strings.HasPrefix(p.Mountpoint, "/var") ||
+            p.Mountpoint == "/" ||
+            strings.HasPrefix(p.Mountpoint, "/snap") ||
+            strings.HasPrefix(p.Mountpoint, "/dev") ||
+            zfsMounts[p.Mountpoint] ||
+            lvmMounts[p.Mountpoint] ||
+            mdMounts[p.Mountpoint] {
+            continue
+        }
+        usage, err := gdisk.Usage(p.Mountpoint)
+        if err == nil && usage.Free > 1*1024*1024*1024 {
+            nonSystemMounts = append(nonSystemMounts, p.Mountpoint)
+        }
+    }
+
+    if len(nonSystemMounts) > 0 {
+        fmt.Printf("Disk Mount Points Available for Stress: %s\n", strings.Join(nonSystemMounts, ", "))
+    } else {
+        fmt.Println("Disk Mount Points: None available, please check df by yourself!")
+    }
+
+    // Raw Disk 偵測
+    rawDisks := []string{}
+    sdDisks, _ := filepath.Glob("/dev/sd[a-z]")
+    nvmeDisks, _ := filepath.Glob("/dev/nvme[0-9]n[0-9]")
+    possibleDisks := append(sdDisks, nvmeDisks...)
+
+    for _, diskPath := range possibleDisks {
+        if _, err := os.Stat(diskPath); err != nil {
+            continue
+        }
+        if zfsDisks[diskPath] || lvmDisks[diskPath] || mdDisks[diskPath] {
+            continue
+        }
+        isSystemDisk := false
+        for _, p := range partitions {
+            if strings.HasPrefix(p.Device, diskPath) && p.Mountpoint == "/" {
+                isSystemDisk = true
+                break
+            }
+        }
+        if !isSystemDisk {
+            if stat, err := os.Stat(diskPath); err == nil {
+                if stat.Mode()&os.ModeDevice != 0 {
+                    var sysStat syscall.Stat_t
+                    if err := syscall.Stat(diskPath, &sysStat); err == nil {
+                        if sysStat.Rdev&0x7 == 0 {
+                            rawDisks = append(rawDisks, diskPath)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if len(rawDisks) > 0 {
+        fmt.Printf("Raw Disks Available for Stress: %s\n", strings.Join(rawDisks, ", "))
+    } else {
+        fmt.Println("Raw Disks: None available")
+    }
+}
+
+
 func main() {
         var mountPoints string
         var fileSize string
@@ -39,6 +211,8 @@ func main() {
         var memoryPercent float64
         var debugFlag bool
         var showHelp bool
+	var printSystemInfo bool
+
         // 為 raw disk 添加新的 flag
         rawDiskTestSize := flag.Int64("disksize", 100*1024*1024, "Size in bytes to test on each raw disk device")
         rawDiskBlockSize := flag.Int64("diskblock", 4*1024, "Block size in bytes for raw disk device testing")
@@ -55,7 +229,15 @@ func main() {
         flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc)")
         flag.BoolVar(&debugFlag, "d", false, "Enable debug mode")
         flag.BoolVar(&showHelp, "h", false, "Show help")
+	flag.BoolVar(&printSystemInfo, "print", false, "Print available system resources for stress testing (alias: -list)")
+	flag.BoolVar(&printSystemInfo, "list", false, "Alias for -print")
         flag.Parse()
+
+	if printSystemInfo {
+		fmt.Println("=== System Resources Available for Stress Testing ===")
+		getSystemInfo()
+		return
+        }
 
         if (!testCPU && memoryPercent == 0 && mountPoints == "" && len(rawDiskPaths) == 0) || showHelp {
                 fmt.Println("System Stress Test Tool")
@@ -63,6 +245,7 @@ func main() {
                 fmt.Println("\nOptions:")
                 flag.PrintDefaults()
                 fmt.Println("\nAt least one of -cpu, -memory, -l, -disk must be specified.")
+		fmt.Println("Use -print or -list to view available system resources.")
                 return
         }
 

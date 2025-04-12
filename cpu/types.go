@@ -1,4 +1,3 @@
-// cpu/types.go
 package cpu
 
 // CPUConfig holds configuration for CPU tests
