@@ -4,7 +4,6 @@ package cpu
 type CPUConfig struct {
 	NumCores int
 	Debug    bool
-	LoadPercent float64
 }
 
 // CPUResult holds the results of CPU tests

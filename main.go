@@ -38,7 +38,6 @@ func main() {
     var duration string
     var testCPU bool
     var cpuCores int
-    var cpuLoad float64
     var memoryPercent float64
     var debugFlag bool
     var showHelp bool
@@ -57,8 +56,7 @@ func main() {
     flag.StringVar(&blockSizes, "block", "4K", "Comma separated block sizes for disk operations (supports K, M, G units)")
     flag.StringVar(&duration, "duration", "10m", "Test duration (e.g. 30s, 5m, 1h)")
     flag.BoolVar(&testCPU, "cpu", false, "Enable CPU testing")
-    flag.IntVar(&cpuCores, "cpu-cores", 0, "Number of CPU cores to stress (default: all cores)")
-    flag.Float64Var(&cpuLoad, "cpu-load", 0, "CPU load percentage (0.1 to 1.0, e.g., 0.5 for 50%, default: 1.0)")
+    flag.IntVar(&cpuCores, "cpu-cores", 0, "Number of CPU cores to stress (0 means all cores)")
     flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc)")
     flag.BoolVar(&debugFlag, "d", false, "Enable debug mode")
     flag.BoolVar(&showHelp, "h", false, "Show help")
@@ -84,7 +82,8 @@ func main() {
 
     configuration, err := cfg.LoadConfig()
     if err != nil {
-        fmt.Printf("Failed to load config.json, using default settings: %v\n", err)
+        //fmt.Printf("Failed to load config.json, using default settings: %v\n", err)
+	configuration = cfg.DefaultConfig()
     }
 
     debug := debugFlag || configuration.Debug
@@ -240,34 +239,21 @@ func main() {
 
     // CPU test
     if testCPU {
-        // Default: use all cores at 100% load
-        numCores := runtime.NumCPU()
-        loadPercent := 1.0
-
-        // Override with --cpu-cores if specified
-        if cpuCores > 0 {
-            if cpuCores > numCores {
-                utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores.", cpuCores, numCores, numCores), true)
-                cpuCores = numCores
-            }
-            numCores = cpuCores
-        }
-
-        // Override with --cpu-load if specified
-        if cpuLoad > 0 {
-            if cpuLoad > 1.0 {
-                utils.LogMessage(fmt.Sprintf("Invalid CPU load: %.2f. Must be between 0.1 and 1.0. Using 1.0.", cpuLoad), true)
-                cpuLoad = 1.0
-            }
-            loadPercent = cpuLoad
+        // Default to all cores if cpuCores is 0
+        numCores := cpuCores
+        if numCores == 0 {
+            numCores = runtime.NumCPU()
+            utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores", numCores), debug)
+        } else if numCores > runtime.NumCPU() {
+            numCores = runtime.NumCPU()
+            utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores.", cpuCores, numCores, numCores), true)
         }
 
         testConfig := cpu.CPUConfig{
-            NumCores:    numCores,
-            LoadPercent: loadPercent,
-            Debug:       debug,
+            NumCores: numCores,
+            Debug:    debug,
         }
-        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores at %.0f%% load...", testConfig.NumCores, testConfig.LoadPercent*100), debug)
+        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores...", testConfig.NumCores), debug)
         wg.Add(1)
         go cpu.RunCPUStressTests(&wg, stop, errorChan, testConfig, perfStats)
     }

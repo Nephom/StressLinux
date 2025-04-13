@@ -42,6 +42,14 @@ type CPUPerformance struct {
     FloatOPS   float64        // Floating-point operations performance
     VectorOPS  float64        // Vector operations performance
     NumCores   int            // Number of active cores
+    CacheInfo  CacheInfo      // Cache information
+}
+
+// CacheInfo stores the sizes of L1, L2, and L3 caches
+type CacheInfo struct {
+    L1Size int64 // in bytes
+    L2Size int64 // in bytes
+    L3Size int64 // in bytes
 }
 
 // MemoryPerformance tracks memory performance metrics
