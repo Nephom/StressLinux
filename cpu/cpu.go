@@ -10,106 +10,15 @@ import (
     "crypto/rsa"
     "crypto/sha256"
     "fmt"
-    "io/ioutil"
     "math"
-    "path/filepath"
     "runtime"
-    "strconv"
     "stress/config"
     "stress/utils"
-    "strings"
     "sync"
     "time"
 
     "golang.org/x/sys/unix"
 )
-
-// getCacheInfo retrieves L1, L2, and L3 cache sizes from the system
-func getCacheInfo() (config.CacheInfo, error) {
-    cacheInfo := config.CacheInfo{}
-    cacheDir := "/sys/devices/system/cpu/cpu0/cache"
-
-    for i := 0; i <= 3; i++ {
-        levelPath := filepath.Join(cacheDir, fmt.Sprintf("index%d/level", i))
-        sizePath := filepath.Join(cacheDir, fmt.Sprintf("index%d/size", i))
-        typePath := filepath.Join(cacheDir, fmt.Sprintf("index%d/type", i))
-
-        levelData, err := ioutil.ReadFile(levelPath)
-        if err != nil {
-            continue
-        }
-        level, err := strconv.Atoi(strings.TrimSpace(string(levelData)))
-        if err != nil {
-            continue
-        }
-
-        typeData, err := ioutil.ReadFile(typePath)
-        if err != nil {
-            continue
-        }
-        cacheType := strings.TrimSpace(string(typeData))
-        if cacheType != "Data" && cacheType != "Unified" {
-            continue
-        }
-
-        sizeData, err := ioutil.ReadFile(sizePath)
-        if err != nil {
-            continue
-        }
-        sizeStr := strings.TrimSpace(string(sizeData))
-        size, err := parseCacheSize(sizeStr)
-        if err != nil {
-            continue
-        }
-
-        switch level {
-        case 1:
-            cacheInfo.L1Size = size
-        case 2:
-            cacheInfo.L2Size = size
-        case 3:
-            cacheInfo.L3Size = size
-        }
-    }
-
-    if cacheInfo.L1Size == 0 {
-        cacheInfo.L1Size = 32 * 1024
-    }
-    if cacheInfo.L2Size == 0 {
-        cacheInfo.L2Size = 256 * 1024
-    }
-    if cacheInfo.L3Size == 0 {
-        cacheInfo.L3Size = 0
-    }
-
-    return cacheInfo, nil
-}
-
-// parseCacheSize converts cache size string (e.g., "32K", "4M") to bytes
-func parseCacheSize(sizeStr string) (int64, error) {
-    sizeStr = strings.TrimSpace(sizeStr)
-    if len(sizeStr) == 0 {
-        return 0, fmt.Errorf("empty cache size string")
-    }
-
-    unit := sizeStr[len(sizeStr)-1:]
-    valueStr := sizeStr[:len(sizeStr)-1]
-    value, err := strconv.ParseInt(valueStr, 10, 64)
-    if err != nil {
-        return 0, fmt.Errorf("invalid cache size value: %v", err)
-    }
-
-    switch strings.ToUpper(unit) {
-    case "K":
-        return value * 1024, nil
-    case "M":
-        return value * 1024 * 1024, nil
-    case "G":
-        return value * 1024 * 1024 * 1024, nil
-    default:
-        return 0, fmt.Errorf("unknown cache size unit: %s", unit)
-    }
-}
 
 // RunCPUStressTests runs CPU stress tests across specified cores
 func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig CPUConfig, perfStats *config.PerformanceStats) {
@@ -122,7 +31,7 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         }
     }
 
-    cacheInfo, err := getCacheInfo()
+    cacheInfo, err := utils.GetCacheInfo()
     if err != nil {
         utils.LogMessage(fmt.Sprintf("Failed to get cache info: %v, using defaults", err), testConfig.Debug)
     }

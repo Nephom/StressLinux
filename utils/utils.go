@@ -2,6 +2,7 @@ package utils
 
 import (
     "fmt"
+    "io/ioutil"
     "log"
     "os"
     "path/filepath"
@@ -10,6 +11,8 @@ import (
     "strings"
     "time"
     "math/rand"
+    "stress/config"
+
 )
 
 // Logger function to handle both console output and file logging
@@ -17,7 +20,6 @@ func LogMessage(message string, debug bool) {
     timestamp := time.Now().Format("2006-01-02 15:04:05")
     logEntry := fmt.Sprintf("%s | %s", timestamp, message)
 
-    // Always log to file
     f, err := os.OpenFile("stress.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
     if err == nil {
         defer f.Close()
@@ -25,7 +27,6 @@ func LogMessage(message string, debug bool) {
         logger.Println(logEntry)
     }
 
-    // Print to console only in debug mode or if explicitly requested
     if debug {
         fmt.Println(logEntry)
     }
@@ -94,14 +95,12 @@ type NUMAInfo struct {
 // GetNUMAInfo retrieves NUMA node information (Linux-specific)
 func GetNUMAInfo() (NUMAInfo, error) {
     info := NUMAInfo{
-        NumNodes: 1, // Default to 1 node if detection fails
+        NumNodes: 1,
         NodeCPUs: make([][]int, 0),
     }
 
-    // Check if /sys/devices/system/node exists
     nodeDir := "/sys/devices/system/node"
     if _, err := os.Stat(nodeDir); os.IsNotExist(err) {
-        // NUMA information not available, create default mapping
         cpus := make([]int, runtime.NumCPU())
         for i := 0; i < runtime.NumCPU(); i++ {
             cpus[i] = i
@@ -110,7 +109,6 @@ func GetNUMAInfo() (NUMAInfo, error) {
         return info, nil
     }
 
-    // Read node directories
     files, err := os.ReadDir(nodeDir)
     if err != nil {
         return info, err
@@ -121,13 +119,11 @@ func GetNUMAInfo() (NUMAInfo, error) {
             continue
         }
 
-        // Parse node ID
         nodeID, err := strconv.Atoi(strings.TrimPrefix(file.Name(), "node"))
         if err != nil {
             continue
         }
 
-        // Ensure we have enough capacity in our slice
         if nodeID >= len(info.NodeCPUs) {
             newSize := nodeID + 1
             if len(info.NodeCPUs) < newSize {
@@ -136,17 +132,14 @@ func GetNUMAInfo() (NUMAInfo, error) {
             }
         }
 
-        // Read CPU list for this node
         cpuList, err := os.ReadFile(filepath.Join(nodeDir, file.Name(), "cpulist"))
         if err != nil {
             continue
         }
 
-        // Parse CPU list (format can be like "0-3,7,9-11")
         cpus := make([]int, 0)
         for _, segment := range strings.Split(strings.TrimSpace(string(cpuList)), ",") {
             if strings.Contains(segment, "-") {
-                // Range of CPUs
                 parts := strings.Split(segment, "-")
                 if len(parts) != 2 {
                     continue
@@ -163,7 +156,6 @@ func GetNUMAInfo() (NUMAInfo, error) {
                     cpus = append(cpus, i)
                 }
             } else {
-                // Single CPU
                 cpu, err := strconv.Atoi(segment)
                 if err != nil {
                     continue
@@ -175,7 +167,6 @@ func GetNUMAInfo() (NUMAInfo, error) {
         info.NodeCPUs[nodeID] = cpus
     }
 
-    // Set the actual number of NUMA nodes found
     info.NumNodes = 0
     for i := range info.NodeCPUs {
         if len(info.NodeCPUs[i]) > 0 {
@@ -189,4 +180,91 @@ func GetNUMAInfo() (NUMAInfo, error) {
 // NewRand creates a new random number generator with the given seed
 func NewRand(seed int64) *rand.Rand {
     return rand.New(rand.NewSource(seed))
+}
+
+// getCacheInfo retrieves L1, L2, and L3 cache sizes from the system
+func GetCacheInfo() (config.CacheInfo, error) {
+    cacheInfo := config.CacheInfo{}
+    cacheDir := "/sys/devices/system/cpu/cpu0/cache"
+
+    for i := 0; i <= 3; i++ {
+        levelPath := filepath.Join(cacheDir, fmt.Sprintf("index%d/level", i))
+        sizePath := filepath.Join(cacheDir, fmt.Sprintf("index%d/size", i))
+        typePath := filepath.Join(cacheDir, fmt.Sprintf("index%d/type", i))
+
+        levelData, err := ioutil.ReadFile(levelPath)
+        if err != nil {
+            continue
+        }
+        level, err := strconv.Atoi(strings.TrimSpace(string(levelData)))
+        if err != nil {
+            continue
+        }
+
+        typeData, err := ioutil.ReadFile(typePath)
+        if err != nil {
+            continue
+        }
+        cacheType := strings.TrimSpace(string(typeData))
+        if cacheType != "Data" && cacheType != "Unified" {
+            continue
+        }
+
+        sizeData, err := ioutil.ReadFile(sizePath)
+        if err != nil {
+            continue
+        }
+        sizeStr := strings.TrimSpace(string(sizeData))
+        size, err := ParseCacheSize(sizeStr)
+        if err != nil {
+            continue
+        }
+
+        switch level {
+        case 1:
+            cacheInfo.L1Size = size
+        case 2:
+            cacheInfo.L2Size = size
+        case 3:
+            cacheInfo.L3Size = size
+        }
+    }
+
+    if cacheInfo.L1Size == 0 {
+        cacheInfo.L1Size = 32 * 1024
+    }
+    if cacheInfo.L2Size == 0 {
+        cacheInfo.L2Size = 256 * 1024
+    }
+    if cacheInfo.L3Size == 0 {
+        cacheInfo.L3Size = 0
+    }
+
+    return cacheInfo, nil
+}
+
+// ParseCacheSize converts cache size string (e.g., "32K", "4M") to bytes
+func ParseCacheSize(sizeStr string) (int64, error) {
+    sizeStr = strings.TrimSpace(sizeStr)
+    if len(sizeStr) == 0 {
+        return 0, fmt.Errorf("empty cache size string")
+    }
+
+    unit := sizeStr[len(sizeStr)-1:]
+    valueStr := sizeStr[:len(sizeStr)-1]
+    value, err := strconv.ParseInt(valueStr, 10, 64)
+    if err != nil {
+        return 0, fmt.Errorf("invalid cache size value: %v", err)
+    }
+
+    switch strings.ToUpper(unit) {
+    case "K":
+        return value * 1024, nil
+    case "M":
+        return value * 1024 * 1024, nil
+    case "G":
+        return value * 1024 * 1024 * 1024, nil
+    default:
+        return 0, fmt.Errorf("unknown cache size unit: %s", unit)
+    }
 }
