@@ -15,9 +15,11 @@ A high-performance system stress testing tool written in Go, designed for testin
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/system-stress-test.git
-cd system-stress-test
+git clone https://github.com/yourname/StressLinux.git
+cd StressLinux
 go build -o stress
+
+[Optional] echo "{\"debug\": false} > config.json
 ```
 
 ## Usage
@@ -31,6 +33,7 @@ go build -o stress
 | Flag         | Description                                                                 |
 |--------------|-----------------------------------------------------------------------------|
 | `-cpu`       | Enable CPU stress testing                                                   |
+| `-cpu-cores`       | Number of CPU cores to stress (0 means all cores)                                                   |
 | `-memory`    | Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc.)              |
 | `-l`         | Comma-separated mount points to test (e.g., `/mnt/disk1,/mnt/disk2`)        |
 | `-disk`      | Raw disk devices to test (e.g., `/dev/sdb`, `/dev/nvme0n1`)                 |
