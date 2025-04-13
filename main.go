@@ -82,8 +82,7 @@ func main() {
 
     configuration, err := cfg.LoadConfig()
     if err != nil {
-        //fmt.Printf("Failed to load config.json, using default settings: %v\n", err)
-	configuration = cfg.DefaultConfig()
+        fmt.Printf("[Ignore] Failed to load config.json, using default settings: %v\n", err)
     }
 
     debug := debugFlag || configuration.Debug
