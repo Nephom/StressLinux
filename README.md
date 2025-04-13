@@ -19,7 +19,8 @@ git clone https://github.com/yourname/StressLinux.git
 cd StressLinux
 go build -o stress
 
-[Optional] echo "{\"debug\": false} > config.json
+[Optional] If you don't set -d parameter and want to check debug message.
+echo "{\"debug\": true} > config.json
 ```
 
 ## Usage
