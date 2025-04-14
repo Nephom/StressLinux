@@ -16,22 +16,49 @@ import (
 )
 
 // Logger function to handle both console output and file logging
-func LogMessage(message string, debug bool) {
+func LogMessage(message string, debug bool) error {
     timestamp := time.Now().Format("2006-01-02 15:04:05")
     logEntry := fmt.Sprintf("%s | %s", timestamp, message)
 
-    f, err := os.OpenFile("stress.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    if err == nil {
+    // Check if stress.log already exists
+    fileInfo, err := os.Stat("stress.log")
+    var creationTime string
+
+    // If the file doesn't exist, record the creation time on first write
+    if os.IsNotExist(err) {
+        creationTime = timestamp
+        // Write creation time at the start of the file
+        f, err := os.Create("stress.log")
+        if err != nil {
+            return fmt.Errorf("failed to create stress.log: %v", err)
+        }
         defer f.Close()
-        logger := log.New(f, "", 0)
-        logger.Println(logEntry)
+        _, err = f.WriteString(fmt.Sprintf("Log file created at: %s\n", creationTime))
+        if err != nil {
+            return fmt.Errorf("failed to write creation time: %v", err)
+        }
+    } else {
+        // If the file exists, use the file's modification time as a fallback
+        creationTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
     }
 
+    // Append the log message
+    f, err := os.OpenFile("stress.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return fmt.Errorf("failed to open stress.log: %v", err)
+    }
+    defer f.Close()
+
+    logger := log.New(f, "", 0)
+    logger.Println(logEntry)
+
+    // If debug is true, print to console
     if debug {
         fmt.Println(logEntry)
     }
-}
 
+    return nil
+}
 // FormatSize converts bytes to human-readable string (KB, MB, GB)
 func FormatSize(size int64) string {
     const (

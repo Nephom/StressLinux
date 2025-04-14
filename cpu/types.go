@@ -4,6 +4,7 @@ package cpu
 type CPUConfig struct {
 	NumCores int
 	Debug    bool
+	CPUList  []int
 }
 
 // CPUResult holds the results of CPU tests

@@ -24,6 +24,7 @@ import (
 func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig CPUConfig, perfStats *config.PerformanceStats) {
     defer wg.Done()
 
+    // 設置 GOMAXPROCS 以限制最大並行度
     if testConfig.NumCores > 0 {
         oldGOMAXPROCS := runtime.GOMAXPROCS(testConfig.NumCores)
         if testConfig.Debug {
@@ -31,6 +32,7 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         }
     }
 
+    // 獲取緩存信息
     cacheInfo, err := utils.GetCacheInfo()
     if err != nil {
         utils.LogMessage(fmt.Sprintf("Failed to get cache info: %v, using defaults", err), testConfig.Debug)
@@ -51,32 +53,23 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
     perfStats.CPU.CacheInfo = cacheInfo
     perfStats.Unlock()
 
-    numaInfo, err := utils.GetNUMAInfo()
-    if err != nil {
-        utils.LogMessage(fmt.Sprintf("Failed to get NUMA info: %v, falling back to single node", err), testConfig.Debug)
-    }
-
-    if testConfig.Debug {
-        utils.LogMessage(fmt.Sprintf("Detected %d NUMA nodes", numaInfo.NumNodes), testConfig.Debug)
-        for i, cpus := range numaInfo.NodeCPUs {
-            if len(cpus) > 0 {
-                utils.LogMessage(fmt.Sprintf("NUMA node %d has CPUs: %v", i, cpus), testConfig.Debug)
-            }
-        }
-    }
-
-    var allCPUs []int
-    for _, cpus := range numaInfo.NodeCPUs {
-        allCPUs = append(allCPUs, cpus...)
-    }
-
+    // 確定要使用的 CPU 核心列表
+    allCPUs := testConfig.CPUList
     if len(allCPUs) == 0 {
-        for i := 0; i < runtime.NumCPU(); i++ {
-            allCPUs = append(allCPUs, i)
+        // 如果 CPUList 為空，則使用 0 到 NumCores-1 的核心
+        allCPUs = make([]int, testConfig.NumCores)
+        for i := 0; i < testConfig.NumCores; i++ {
+            allCPUs[i] = i
         }
     }
 
-    if testConfig.NumCores > 0 && testConfig.NumCores < len(allCPUs) {
+    // 確保 NumCores 不超過 CPUList 的長度
+    if testConfig.NumCores > len(allCPUs) {
+        testConfig.NumCores = len(allCPUs)
+        if testConfig.Debug {
+            utils.LogMessage(fmt.Sprintf("Adjusted NumCores to %d to match CPU list length", testConfig.NumCores), testConfig.Debug)
+        }
+    } else if testConfig.NumCores > 0 {
         allCPUs = allCPUs[:testConfig.NumCores]
     }
 
@@ -84,7 +77,7 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
     perfStats.CPU.NumCores = len(allCPUs)
     perfStats.Unlock()
 
-    utils.LogMessage(fmt.Sprintf("Running CPU tests on %d cores", len(allCPUs)), testConfig.Debug)
+    utils.LogMessage(fmt.Sprintf("Running CPU tests on %d cores (CPUs: %v)", len(allCPUs), allCPUs), testConfig.Debug)
 
     var innerWg sync.WaitGroup
     for _, cpuID := range allCPUs {

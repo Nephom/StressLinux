@@ -8,6 +8,7 @@ import (
         "strings"
         "sync"
         "time"
+        "math/rand"
 
         cfg "stress/config"
         "stress/cpu"
@@ -15,7 +16,7 @@ import (
         "stress/memory"
         "stress/rawdisk"
         "stress/utils"
-	"stress/systeminfo"
+        "stress/systeminfo"
 )
 
 type stringSliceFlag []string
@@ -42,6 +43,7 @@ func main() {
     var debugFlag bool
     var showHelp bool
     var printSystemInfo bool
+    var numaNode int
 
     // 為 raw disk 添加新的 flag
     rawDiskTestSize := flag.Int64("disksize", 100*1024*1024, "Size in bytes to test on each raw disk device")
@@ -57,6 +59,7 @@ func main() {
     flag.StringVar(&duration, "duration", "10m", "Test duration (e.g. 30s, 5m, 1h)")
     flag.BoolVar(&testCPU, "cpu", false, "Enable CPU testing")
     flag.IntVar(&cpuCores, "cpu-cores", 0, "Number of CPU cores to stress (0 means all cores)")
+    flag.IntVar(&numaNode, "numa", -1, "NUMA node to stress (e.g., 0 or 1; default -1 means all nodes)")
     flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc)")
     flag.BoolVar(&debugFlag, "d", false, "Enable debug mode")
     flag.BoolVar(&showHelp, "h", false, "Show help")
@@ -236,23 +239,76 @@ func main() {
         }
     }
 
-    // CPU test
+	// CPU test
     if testCPU {
-        // Default to all cores if cpuCores is 0
+        // 設置隨機數種子，確保每次運行有不同的隨機選擇
+        rand.Seed(time.Now().UnixNano())
+
+        // 獲取 NUMA 信息
+        numaInfo, err := utils.GetNUMAInfo()
+        if err != nil {
+            utils.LogMessage(fmt.Sprintf("Failed to get NUMA info: %v", err), debug)
+            numaNode = -1
+        }
+
         numCores := cpuCores
-        if numCores == 0 {
-            numCores = runtime.NumCPU()
-            utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores", numCores), debug)
-        } else if numCores > runtime.NumCPU() {
-            numCores = runtime.NumCPU()
-            utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores.", cpuCores, numCores, numCores), true)
+        selectedCPUs := []int{}
+
+        if numaNode >= 0 && numaInfo.NumNodes > 0 && numaNode < numaInfo.NumNodes {
+            // 使用指定 NUMA 節點的核心
+            selectedCPUs = numaInfo.NodeCPUs[numaNode]
+            if len(selectedCPUs) == 0 {
+                utils.LogMessage(fmt.Sprintf("NUMA node %d has no CPUs, falling back to all cores", numaNode), true)
+                numaNode = -1
+            } else {
+                utils.LogMessage(fmt.Sprintf("NUMA node %d has CPUs: %v", numaNode, selectedCPUs), debug)
+                // 檢查 cpuCores 是否與 NUMA 節點核心數量衝突
+                if numCores > 0 && numCores > len(selectedCPUs) {
+                    utils.LogMessage(fmt.Sprintf("Error: Requested %d cores, but NUMA node %d only has %d cores. Falling back to all cores.", cpuCores, numaNode, len(selectedCPUs)), true)
+                    numaNode = -1
+                }
+            }
+        }
+
+        if numaNode < 0 || numaInfo.NumNodes == 0 {
+            // 未指定 NUMA 節點或無 NUMA 信息，使用所有核心
+            totalCores := runtime.NumCPU()
+            allCPUs := make([]int, totalCores)
+            for i := 0; i < totalCores; i++ {
+                allCPUs[i] = i
+            }
+
+            if numCores == 0 {
+                numCores = totalCores
+                selectedCPUs = allCPUs
+                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores: %v", numCores, selectedCPUs), debug)
+            } else if numCores > totalCores {
+                numCores = totalCores
+                selectedCPUs = allCPUs
+                utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores: %v", cpuCores, totalCores, numCores, selectedCPUs), true)
+            } else {
+                // 隨機選擇 numCores 個核心
+                selectedCPUs = randomSelectCores(allCPUs, numCores)
+                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores: %v", numCores, selectedCPUs), debug)
+            }
+        } else {
+            // 指定了 NUMA 節點
+            if numCores == 0 {
+                numCores = len(selectedCPUs)
+                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
+            } else {
+                // 隨機選擇 numCores 個核心（在 NUMA 節點內）
+                selectedCPUs = randomSelectCores(selectedCPUs, numCores)
+                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
+            }
         }
 
         testConfig := cpu.CPUConfig{
             NumCores: numCores,
             Debug:    debug,
+            CPUList:  selectedCPUs,
         }
-        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores...", testConfig.NumCores), debug)
+        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores (CPUs: %v)...", testConfig.NumCores, testConfig.CPUList), debug)
         wg.Add(1)
         go cpu.RunCPUStressTests(&wg, stop, errorChan, testConfig, perfStats)
     }
@@ -419,4 +475,30 @@ func printRawDiskPerformanceResults(perfStats *cfg.PerformanceStats) {
                                 result.WriteSpeed), true)
                 }
         }
+}
+
+// randomSelectCores 從給定的核心列表中隨機選擇指定數量的核心
+func randomSelectCores(cpus []int, count int) []int {
+    if count >= len(cpus) {
+        return append([]int{}, cpus...) // 返回所有核心的副本
+    }
+
+    // 複製核心列表以避免修改原始數據
+    available := append([]int{}, cpus...)
+    selected := make([]int, 0, count)
+
+    // 隨機選擇 count 個核心
+    for i := 0; i < count; i++ {
+        if len(available) == 0 {
+            break
+        }
+        // 隨機選一個索引
+        idx := rand.Intn(len(available))
+        // 添加選中的核心
+        selected = append(selected, available[idx])
+        // 從可用列表中移除已選核心
+        available = append(available[:idx], available[idx+1:]...)
+    }
+
+    return selected
 }
