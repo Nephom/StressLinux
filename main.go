@@ -1,22 +1,22 @@
 package main
 
 import (
-        "flag"
-        "fmt"
-        "os"
-        "runtime"
-        "strings"
-        "sync"
-        "time"
-        "math/rand"
+    "flag"
+    "fmt"
+    "os"
+    "runtime"
+    "strings"
+    "sync"
+    "time"
+    "math/rand"
 
-        cfg "stress/config"
-        "stress/cpu"
-        "stress/disk"
-        "stress/memory"
-        "stress/rawdisk"
-        "stress/utils"
-        "stress/systeminfo"
+    cfg "stress/config"
+    "stress/cpu"
+    "stress/disk"
+    "stress/memory"
+    "stress/rawdisk"
+    "stress/utils"
+    "stress/systeminfo"
 )
 
 type stringSliceFlag []string
@@ -36,36 +36,83 @@ func main() {
     var testMode string
     var blockSizes string
     var rawDiskPaths stringSliceFlag
+    var rawDiskTestSize string
+    var rawDiskBlockSize string
+    var rawDiskTestMode string
+    var rawDiskStartOffset string
     var duration string
     var testCPU bool
     var cpuCores int
+    var cpuLoad string
     var memoryPercent float64
     var debugFlag bool
     var showHelp bool
     var printSystemInfo bool
     var numaNode int
 
-    // 為 raw disk 添加新的 flag
-    rawDiskTestSize := flag.Int64("disksize", 100*1024*1024, "Size in bytes to test on each raw disk device")
-    rawDiskBlockSize := flag.Int64("diskblock", 4*1024, "Block size in bytes for raw disk device testing")
-    rawDiskTestMode := flag.String("diskmode", "both", "Test mode for raw disk device: 'sequential', 'random', or 'both'")
-    rawDiskStartOffset := flag.Int64("diskoffset", 1024*1024*1024, "Start offset in bytes from the beginning of the raw device")
-
     flag.StringVar(&mountPoints, "l", "", "Comma separated mount points to test (e.g. /mnt/disk1,/mnt/disk2)")
     flag.Var(&rawDiskPaths, "disk", "Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1)")
     flag.StringVar(&fileSize, "size", "10MB", "Size of test files (supports K, M, G units)")
     flag.StringVar(&testMode, "mode", "both", "Test mode: sequential, random, or both")
     flag.StringVar(&blockSizes, "block", "4K", "Comma separated block sizes for disk operations (supports K, M, G units)")
+    flag.StringVar(&rawDiskTestSize, "disksize", "100M", "Size to test on each raw disk device (e.g., 100M, 1G, supports K, M, G units)")
+    flag.StringVar(&rawDiskBlockSize, "diskblock", "4K", "Block size for raw disk device testing (e.g., 4K, 1M, supports K, M, G units)")
+    flag.StringVar(&rawDiskTestMode, "diskmode", "both", "Test mode for raw disk device: 'sequential', 'random', or 'both'")
+    flag.StringVar(&rawDiskStartOffset, "diskoffset", "1G", "Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units)")
     flag.StringVar(&duration, "duration", "10m", "Test duration (e.g. 30s, 5m, 1h)")
     flag.BoolVar(&testCPU, "cpu", false, "Enable CPU testing")
     flag.IntVar(&cpuCores, "cpu-cores", 0, "Number of CPU cores to stress (0 means all cores)")
+    flag.StringVar(&cpuLoad, "cpu-load", "Default", "CPU load level: High (2x load), Low (0.25x load), or Default (standard load)")
     flag.IntVar(&numaNode, "numa", -1, "NUMA node to stress (e.g., 0 or 1; default -1 means all nodes)")
-    flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc)")
+    flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%)")
     flag.BoolVar(&debugFlag, "d", false, "Enable debug mode")
     flag.BoolVar(&showHelp, "h", false, "Show help")
     flag.BoolVar(&printSystemInfo, "print", false, "Print available system resources for stress testing (alias: -list)")
     flag.BoolVar(&printSystemInfo, "list", false, "Alias for -print")
     flag.Parse()
+
+    // 檢查 -memory 參數範圍
+    if memoryPercent != 0 {
+        if memoryPercent < 0.1 || memoryPercent > 9.9 {
+            utils.LogMessage(fmt.Sprintf("Error: -memory must be between 0.1 and 9.9, got %.1f", memoryPercent), true)
+            os.Exit(1)
+        }
+    }
+
+    // 解析 RawDisk 參數
+    var rawDiskTestSizeBytes, rawDiskBlockSizeBytes, rawDiskStartOffsetBytes int64
+    if rawDiskTestSize != "" {
+        size, err := utils.ParseSize(rawDiskTestSize)
+        if err != nil {
+            utils.LogMessage(fmt.Sprintf("Error: Invalid -disksize '%s': %v", rawDiskTestSize, err), true)
+            os.Exit(1)
+        }
+        rawDiskTestSizeBytes = size
+    } else {
+        rawDiskTestSizeBytes = 100 * 1024 * 1024
+    }
+
+    if rawDiskBlockSize != "" {
+        size, err := utils.ParseSize(rawDiskBlockSize)
+        if err != nil {
+            utils.LogMessage(fmt.Sprintf("Error: Invalid -diskblock '%s': %v", rawDiskBlockSize, err), true)
+            os.Exit(1)
+        }
+        rawDiskBlockSizeBytes = size
+    } else {
+        rawDiskBlockSizeBytes = 4 * 1024
+    }
+
+    if rawDiskStartOffset != "" {
+        offset, err := utils.ParseSize(rawDiskStartOffset)
+        if err != nil {
+            utils.LogMessage(fmt.Sprintf("Error: Invalid -diskoffset '%s': %v", rawDiskStartOffset, err), true)
+            os.Exit(1)
+        }
+        rawDiskStartOffsetBytes = offset
+    } else {
+        rawDiskStartOffsetBytes = 1024 * 1024 * 1024
+    }
 
     if printSystemInfo {
         info := systeminfo.GetSystemInfo()
@@ -78,8 +125,10 @@ func main() {
         fmt.Println("Usage: stress [options]")
         fmt.Println("\nOptions:")
         flag.PrintDefaults()
-        fmt.Println("\nAt least one of -cpu, -memory, -l, -disk must be specified.")
-        fmt.Println("Use -print or -list to view available system resources.")
+        fmt.Println("\nNotes:")
+        fmt.Println("- At least one of -cpu, -memory, -l, -disk must be specified.")
+        fmt.Println("- Use -cpu-load to adjust CPU test intensity: 'High' (2x load), 'Low' (0.25x load), or 'Default' (standard load).")
+        fmt.Println("- Use -print or -list to view available system resources.")
         return
     }
 
@@ -100,7 +149,9 @@ func main() {
     utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), debug)
 
     perfStats := &cfg.PerformanceStats{
-        CPU:     cfg.CPUPerformance{GFLOPS: 0.0},
+        CPU: cfg.CPUPerformance{
+            CoreGFLOPS: make(map[int]float64),
+        },
         Memory:  cfg.MemoryPerformance{},
         Disk:    []cfg.DiskPerformance{},
         RawDisk: []cfg.RawDiskPerformance{},
@@ -120,10 +171,9 @@ func main() {
 
     // Memory test with percentage-based configuration
     if memoryPercent > 0 {
-        // Convert memory percentage (e.g., 7 means 70%, 1.5 means 15%)
         memUsagePercent := memoryPercent / 10.0
         if memUsagePercent > 0.95 {
-            memUsagePercent = 0.95 // Cap at 95% for safety
+            memUsagePercent = 0.95
             utils.LogMessage("Memory usage capped at 95% for system stability", true)
         }
 
@@ -205,7 +255,7 @@ func main() {
         }
 
         var rawTestModes []string
-        switch *rawDiskTestMode {
+        switch rawDiskTestMode {
         case "sequential":
             rawTestModes = []string{"sequential"}
         case "random":
@@ -213,38 +263,36 @@ func main() {
         case "both":
             rawTestModes = []string{"sequential", "random"}
         default:
-            utils.LogMessage(fmt.Sprintf("Invalid raw disk test mode: %s, using both", *rawDiskTestMode), true)
+            utils.LogMessage(fmt.Sprintf("Invalid raw disk test mode: %s, using both", rawDiskTestMode), true)
             rawTestModes = []string{"sequential", "random"}
         }
 
         for _, mode := range rawTestModes {
             rawDiskTestConfig := rawdisk.RawDiskTestConfig{
                 DevicePaths: rawDiskPaths,
-                TestSize:    *rawDiskTestSize,
-                BlockSize:   *rawDiskBlockSize,
+                TestSize:    rawDiskTestSizeBytes,
+                BlockSize:   rawDiskBlockSizeBytes,
                 TestMode:    mode,
-                StartOffset: *rawDiskStartOffset,
+                StartOffset: rawDiskStartOffsetBytes,
             }
 
             utils.LogMessage(fmt.Sprintf("Starting raw disk tests on %d devices: %v",
                 len(rawDiskPaths), rawDiskPaths), debug)
             utils.LogMessage(fmt.Sprintf("Test size: %s, Block size: %s, Mode: %s, Start offset: %s",
-                utils.FormatSize(*rawDiskTestSize),
-                utils.FormatSize(*rawDiskBlockSize),
+                utils.FormatSize(rawDiskTestSizeBytes),
+                utils.FormatSize(rawDiskBlockSizeBytes),
                 mode,
-                utils.FormatSize(*rawDiskStartOffset)), debug)
+                utils.FormatSize(rawDiskStartOffsetBytes)), debug)
 
             wg.Add(1)
             go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug)
         }
     }
 
-	// CPU test
+    // CPU test
     if testCPU {
-        // 設置隨機數種子，確保每次運行有不同的隨機選擇
         rand.Seed(time.Now().UnixNano())
 
-        // 獲取 NUMA 信息
         numaInfo, err := utils.GetNUMAInfo()
         if err != nil {
             utils.LogMessage(fmt.Sprintf("Failed to get NUMA info: %v", err), debug)
@@ -255,14 +303,12 @@ func main() {
         selectedCPUs := []int{}
 
         if numaNode >= 0 && numaInfo.NumNodes > 0 && numaNode < numaInfo.NumNodes {
-            // 使用指定 NUMA 節點的核心
             selectedCPUs = numaInfo.NodeCPUs[numaNode]
             if len(selectedCPUs) == 0 {
                 utils.LogMessage(fmt.Sprintf("NUMA node %d has no CPUs, falling back to all cores", numaNode), true)
                 numaNode = -1
             } else {
                 utils.LogMessage(fmt.Sprintf("NUMA node %d has CPUs: %v", numaNode, selectedCPUs), debug)
-                // 檢查 cpuCores 是否與 NUMA 節點核心數量衝突
                 if numCores > 0 && numCores > len(selectedCPUs) {
                     utils.LogMessage(fmt.Sprintf("Error: Requested %d cores, but NUMA node %d only has %d cores. Falling back to all cores.", cpuCores, numaNode, len(selectedCPUs)), true)
                     numaNode = -1
@@ -271,7 +317,6 @@ func main() {
         }
 
         if numaNode < 0 || numaInfo.NumNodes == 0 {
-            // 未指定 NUMA 節點或無 NUMA 信息，使用所有核心
             totalCores := runtime.NumCPU()
             allCPUs := make([]int, totalCores)
             for i := 0; i < totalCores; i++ {
@@ -287,28 +332,26 @@ func main() {
                 selectedCPUs = allCPUs
                 utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores: %v", cpuCores, totalCores, numCores, selectedCPUs), true)
             } else {
-                // 隨機選擇 numCores 個核心
                 selectedCPUs = randomSelectCores(allCPUs, numCores)
                 utils.LogMessage(fmt.Sprintf("Randomly selected %d cores: %v", numCores, selectedCPUs), debug)
             }
         } else {
-            // 指定了 NUMA 節點
             if numCores == 0 {
                 numCores = len(selectedCPUs)
                 utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
             } else {
-                // 隨機選擇 numCores 個核心（在 NUMA 節點內）
                 selectedCPUs = randomSelectCores(selectedCPUs, numCores)
                 utils.LogMessage(fmt.Sprintf("Randomly selected %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
             }
         }
 
         testConfig := cpu.CPUConfig{
-            NumCores: numCores,
-            Debug:    debug,
-            CPUList:  selectedCPUs,
+            NumCores:   numCores,
+            Debug:      debug,
+            CPUList:    selectedCPUs,
+            LoadLevel:  cpuLoad,
         }
-        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores (CPUs: %v)...", testConfig.NumCores, testConfig.CPUList), debug)
+        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores (CPUs: %v) with load level: %s...", testConfig.NumCores, testConfig.CPUList, testConfig.LoadLevel), debug)
         wg.Add(1)
         go cpu.RunCPUStressTests(&wg, stop, errorChan, testConfig, perfStats)
     }
@@ -404,23 +447,49 @@ func main() {
     elapsedTime := time.Since(startTime)
 
     utils.LogMessage("=== PERFORMANCE RESULTS ===", true)
+    var totalOperations uint64
     if testCPU {
-        utils.LogMessage(fmt.Sprintf("CPU Performance: %.2f GFLOPS", perfStats.CPU.GFLOPS), true)
+        cpuTotal := perfStats.CPU.IntegerCount + perfStats.CPU.FloatCount + perfStats.CPU.VectorCount +
+                    perfStats.CPU.CacheCount + perfStats.CPU.BranchCount + perfStats.CPU.CryptoCount
+        utils.LogMessage(fmt.Sprintf("CPU Performance: %.2f GFLOPS (Load Level: %s)", perfStats.CPU.GFLOPS, cpuLoad), true)
+        utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
+            perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
+            perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
+        totalOperations += cpuTotal
     }
     if memoryPercent > 0 {
-        utils.LogMessage(fmt.Sprintf("Memory Performance - Read: %.2f MB/s, Write: %.2f MB/s",
-            perfStats.Memory.ReadSpeed, perfStats.Memory.WriteSpeed), true)
+        memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
+        utils.LogMessage(fmt.Sprintf("Memory Performance - Read: %.2f MB/s, Write: %.2f MB/s, Random Access: %.2f MB/s",
+            perfStats.Memory.ReadSpeed, perfStats.Memory.WriteSpeed, perfStats.Memory.RandomAccessSpeed), true)
+        utils.LogMessage(fmt.Sprintf("Memory Operations: Write=%d, Read=%d, Random Access=%d, Total=%d",
+            perfStats.Memory.WriteCount, perfStats.Memory.ReadCount, perfStats.Memory.RandomAccessCount, memTotal), true)
+        totalOperations += memTotal
     }
     if len(mounts) > 0 {
+        var diskTotal uint64
         utils.LogMessage("Disk Performance:", true)
         for _, disk := range perfStats.Disk {
-            utils.LogMessage(fmt.Sprintf("  Mount: %s, Mode: %s, Block: %s - Read: %.2f MB/s, Write: %.2f MB/s",
-                disk.MountPoint, disk.Mode, utils.FormatSize(disk.BlockSize), disk.ReadSpeed, disk.WriteSpeed), true)
+            diskOps := disk.WriteCount + disk.ReadCount
+            utils.LogMessage(fmt.Sprintf("  Mount: %s, Mode: %s, Block: %s - Read: %.2f MB/s, Write: %.2f MB/s, Operations: Write=%d, Read=%d, Total=%d",
+                disk.MountPoint, disk.Mode, utils.FormatSize(disk.BlockSize), disk.ReadSpeed, disk.WriteSpeed,
+                disk.WriteCount, disk.ReadCount, diskOps), true)
+            diskTotal += diskOps
         }
+        utils.LogMessage(fmt.Sprintf("Disk Total Operations: %d", diskTotal), true)
+        totalOperations += diskTotal
     }
     if len(rawDiskPaths) > 0 {
+        var rawDiskTotal uint64
         printRawDiskPerformanceResults(perfStats)
+        for _, rawDisk := range perfStats.RawDisk {
+            rawDiskOps := rawDisk.WriteCount + rawDisk.ReadCount
+            rawDiskTotal += rawDiskOps
+        }
+        utils.LogMessage(fmt.Sprintf("RawDisk Total Operations: %d", rawDiskTotal), true)
+        totalOperations += rawDiskTotal
     }
+
+    utils.LogMessage(fmt.Sprintf("Total Operations Across All Tests: %d", totalOperations), true)
 
     resultStr := fmt.Sprintf("Stress Test Summary - Duration: %s", elapsedTime.Round(time.Second))
     if testCPU {
@@ -448,55 +517,51 @@ func main() {
 
 // 整合 printRawDiskPerformanceResults 函數
 func printRawDiskPerformanceResults(perfStats *cfg.PerformanceStats) {
-        if len(perfStats.RawDisk) == 0 {
-                return
+    if len(perfStats.RawDisk) == 0 {
+        return
+    }
+
+    utils.LogMessage("\nRaw Disk Performance Results:", true)
+    utils.LogMessage("-----------------------------", true)
+
+    deviceResults := make(map[string][]cfg.RawDiskPerformance)
+    for _, result := range perfStats.RawDisk {
+        deviceResults[result.DevicePath] = append(deviceResults[result.DevicePath], result)
+    }
+
+    for device, results := range deviceResults {
+        utils.LogMessage(fmt.Sprintf("\nDevice: %s", device), true)
+        utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s %-15s", "Mode", "Block Size", "Block Size", "Read Speed", "Write Speed", "Operations"), true)
+        utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s %-15s", "----", "----------", "----------", "----------", "-----------", "----------"), true)
+
+        for _, result := range results {
+            opsTotal := result.WriteCount + result.ReadCount
+            utils.LogMessage(fmt.Sprintf("%-12s %-10d %-12s %-15.2f %-15.2f %-15d",
+                result.Mode,
+                result.BlockSize,
+                utils.FormatSize(result.BlockSize),
+                result.ReadSpeed,
+                result.WriteSpeed,
+                opsTotal), true)
         }
-
-        utils.LogMessage("\nRaw Disk Performance Results:", true)
-        utils.LogMessage("-----------------------------", true)
-
-        // Group by device path
-        deviceResults := make(map[string][]cfg.RawDiskPerformance)
-        for _, result := range perfStats.RawDisk {
-                deviceResults[result.DevicePath] = append(deviceResults[result.DevicePath], result)
-        }
-
-        for device, results := range deviceResults {
-                utils.LogMessage(fmt.Sprintf("\nDevice: %s", device), true)
-                utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s", "Mode", "Block Size", "Block Size", "Read Speed", "Write Speed"), true)
-                utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s", "----", "----------", "----------", "----------", "-----------"), true)
-
-                for _, result := range results {
-                        utils.LogMessage(fmt.Sprintf("%-12s %-10d %-12s %-15.2f %-15.2f",
-                                result.Mode,
-                                result.BlockSize,
-                                utils.FormatSize(result.BlockSize),
-                                result.ReadSpeed,
-                                result.WriteSpeed), true)
-                }
-        }
+    }
 }
 
 // randomSelectCores 從給定的核心列表中隨機選擇指定數量的核心
 func randomSelectCores(cpus []int, count int) []int {
     if count >= len(cpus) {
-        return append([]int{}, cpus...) // 返回所有核心的副本
+        return append([]int{}, cpus...)
     }
 
-    // 複製核心列表以避免修改原始數據
     available := append([]int{}, cpus...)
     selected := make([]int, 0, count)
 
-    // 隨機選擇 count 個核心
     for i := 0; i < count; i++ {
         if len(available) == 0 {
             break
         }
-        // 隨機選一個索引
         idx := rand.Intn(len(available))
-        // 添加選中的核心
         selected = append(selected, available[idx])
-        // 從可用列表中移除已選核心
         available = append(available[:idx], available[idx+1:]...)
     }
 

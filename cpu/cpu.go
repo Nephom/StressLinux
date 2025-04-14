@@ -16,15 +16,37 @@ import (
     "stress/utils"
     "sync"
     "time"
+    "strings"
 
     "golang.org/x/sys/unix"
 )
+
+// adjustBatchSize adjusts the batch size based on the load level
+func adjustBatchSize(baseBatchSize int, loadLevel string) int {
+    adjusted := baseBatchSize
+    switch strings.ToLower(loadLevel) {
+    case "high", "2":
+        adjusted = baseBatchSize * 2
+    case "low", "1":
+        adjusted = baseBatchSize / 4 // 0.25x
+    case "default", "0", "":
+        adjusted = baseBatchSize
+    default:
+        utils.LogMessage(fmt.Sprintf("Invalid CPU load level: %s, using Default", loadLevel), true)
+        adjusted = baseBatchSize
+    }
+    // Ensure batchSize is at least 100 to maintain test accuracy
+    if adjusted < 100 {
+        adjusted = 100
+    }
+    return adjusted
+}
 
 // RunCPUStressTests runs CPU stress tests across specified cores
 func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig CPUConfig, perfStats *config.PerformanceStats) {
     defer wg.Done()
 
-    // 設置 GOMAXPROCS 以限制最大並行度
+    // Set GOMAXPROCS to limit maximum parallelism
     if testConfig.NumCores > 0 {
         oldGOMAXPROCS := runtime.GOMAXPROCS(testConfig.NumCores)
         if testConfig.Debug {
@@ -32,7 +54,7 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         }
     }
 
-    // 獲取緩存信息
+    // Get cache information
     cacheInfo, err := utils.GetCacheInfo()
     if err != nil {
         utils.LogMessage(fmt.Sprintf("Failed to get cache info: %v, using defaults", err), testConfig.Debug)
@@ -53,17 +75,16 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
     perfStats.CPU.CacheInfo = cacheInfo
     perfStats.Unlock()
 
-    // 確定要使用的 CPU 核心列表
+    // Determine the list of CPU cores to use
     allCPUs := testConfig.CPUList
     if len(allCPUs) == 0 {
-        // 如果 CPUList 為空，則使用 0 到 NumCores-1 的核心
         allCPUs = make([]int, testConfig.NumCores)
         for i := 0; i < testConfig.NumCores; i++ {
             allCPUs[i] = i
         }
     }
 
-    // 確保 NumCores 不超過 CPUList 的長度
+    // Ensure NumCores does not exceed CPUList length
     if testConfig.NumCores > len(allCPUs) {
         testConfig.NumCores = len(allCPUs)
         if testConfig.Debug {
@@ -84,14 +105,14 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         innerWg.Add(1)
         go func(id int) {
             defer innerWg.Done()
-            runAllTestsPerCore(stop, errorChan, id, perfStats, testConfig.Debug)
+            runAllTestsPerCore(stop, errorChan, id, perfStats, testConfig.Debug, testConfig.LoadLevel)
         }(cpuID)
     }
     innerWg.Wait()
 }
 
 // runAllTestsPerCore runs all test types sequentially in one goroutine per core
-func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool) {
+func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
     if debug {
         utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)
     }
@@ -118,7 +139,7 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
 
     testFuncs := []struct {
         name   string
-        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, time.Duration)
+        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
         weight float64
     }{
         {"integer", runIntegerComputationParallel, 0.2},
@@ -142,19 +163,19 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         default:
             for _, test := range testFuncs {
                 testBudget := time.Duration(float64(cycleDuration) * test.weight)
-                test.fn(stop, errorChan, cpuID, perfStats, debug, testBudget)
+                test.fn(stop, errorChan, cpuID, perfStats, debug, loadLevel, testBudget)
             }
-            // 移除週期對齊的 time.Sleep，讓測試持續執行
         }
     }
 }
 
 // runIntegerComputationParallel performs intensive integer operations
-func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
-    const batchSize = 1000000
+    baseBatchSize := 1000000
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     primes := []int{2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53}
 
     var expectedResult int64
@@ -184,7 +205,6 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
         }
     }
 
-    // 統一在測試結束時計算性能
     elapsed := time.Since(startTime)
     if elapsed > 0 {
         opsPerSecond := float64(operationCount) / elapsed.Seconds()
@@ -195,20 +215,22 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
         perfStats.CPU.IntegerOPS = (perfStats.CPU.IntegerOPS + opsPerSecond/1e9) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
+        perfStats.CPU.IntegerCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d integer perf: %.2f GOPS (%.2f GFLOPS equiv)", cpuID, opsPerSecond/1e9, gflopsEquivalent), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d integer perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
         }
     }
 }
 
 // runFloatComputationParallel performs intensive floating-point operations
-func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
-    const batchSize = 500000
+    baseBatchSize := 500000
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     constants := []float64{3.14159, 2.71828, 1.41421, 1.73205, 2.23606, 2.44949, 2.64575}
 
     var expectedResult float64
@@ -249,21 +271,23 @@ func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, 
         perfStats.CPU.FloatOPS = (perfStats.CPU.FloatOPS + opsPerSecond/1e9) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflops) / 2
+        perfStats.CPU.FloatCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d float perf: %.2f GFLOPS", cpuID, gflops), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d float perf: %.2f GFLOPS, operations: %d", cpuID, gflops, operationCount), debug)
         }
     }
 }
 
 // runVectorComputationParallel performs SIMD-like vector operations
-func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
     const vectorSize = 1024
-    const batchSize = 1000
+    baseBatchSize := 1000
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
 
     vecA := make([]float64, vectorSize)
     vecB := make([]float64, vectorSize)
@@ -314,22 +338,22 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
         perfStats.CPU.VectorOPS = (perfStats.CPU.VectorOPS + opsPerSecond/1e9) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflops) / 2
+        perfStats.CPU.VectorCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d vector perf: %.2f GFLOPS", cpuID, gflops), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d vector perf: %.2f GFLOPS, operations: %d", cpuID, gflops, operationCount), debug)
         }
     }
 }
 
 // runCacheStressParallel performs cache stress testing targeting a specific cache level
-func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
-    // 動態調整 batchSize，確保用滿時間
-    batchSize := 1000000
-    // 簡單校正：執行一次樣本測試，估計每批次執行時間
+    baseBatchSize := 1000000
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     sampleStart := time.Now()
     perfStats.Lock()
     cacheInfo := perfStats.CPU.CacheInfo
@@ -383,13 +407,13 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
     }
     sampleElapsed := time.Since(sampleStart)
     if sampleElapsed > 0 {
-        batchTime := sampleElapsed / 1000 // 每批次的平均時間
+        batchTime := sampleElapsed / 1000
         targetBatches := int(duration / batchTime)
         if targetBatches > 0 {
             batchSize = (batchSize * targetBatches) / 1000
         }
-        if batchSize < 1000 {
-            batchSize = 1000
+        if batchSize < 100 {
+            batchSize = 100
         }
     }
 
@@ -410,7 +434,6 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
                         break
                     }
                     sum += data[idx]
-                    // 增加計算負載
                     for k := 0; k < 10; k++ {
                         sum ^= data[idx]
                         sum += int64(math.Sqrt(float64(sum)))
@@ -439,20 +462,22 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
         perfStats.Lock()
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
+        perfStats.CPU.CacheCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d cache perf: %.2f GOPS (%.2f GFLOPS equiv)", cpuID, opsPerSecond/1e9, gflopsEquivalent), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d cache perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
         }
     }
 }
 
 // runBranchPredictionParallel performs branch prediction stress testing
-func runBranchPredictionParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runBranchPredictionParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
-    const batchSize = 1000000
+    baseBatchSize := 1000000
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     rng := utils.NewRand(int64(cpuID))
 
     for time.Since(startTime) < duration {
@@ -488,21 +513,23 @@ func runBranchPredictionParallel(stop <-chan struct{}, errorChan chan<- string, 
         perfStats.Lock()
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
+        perfStats.CPU.BranchCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d branch perf: %.2f GOPS (%.2f GFLOPS equiv)", cpuID, opsPerSecond/1e9, gflopsEquivalent), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d branch perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
         }
     }
 }
 
 // runCryptoStressParallel performs cryptographic stress testing
-func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, duration time.Duration) {
+func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
 
     const blockSize = 1024 * 1024
-    const batchSize = 100
+    baseBatchSize := 100
+    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
 
     rng := utils.NewRand(int64(cpuID))
     data := make([]byte, blockSize)
@@ -604,10 +631,11 @@ func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuI
         perfStats.Lock()
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
+        perfStats.CPU.CryptoCount += operationCount
         perfStats.Unlock()
 
         if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d crypto perf: %.2f GOPS (%.2f GFLOPS equiv)", cpuID, opsPerSecond/1e9, gflopsEquivalent), debug)
+            utils.LogMessage(fmt.Sprintf("CPU %d crypto perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
         }
     }
 }

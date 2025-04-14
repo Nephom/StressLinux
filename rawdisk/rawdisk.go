@@ -34,7 +34,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
     }
     if testConfig.StartOffset < 0 {
         utils.LogMessage(fmt.Sprintf("Invalid StartOffset %d, using default 1GB", testConfig.StartOffset), true)
-        // Default to 1GB offset to avoid partition tables
         testConfig.StartOffset = 1 * 1024 * 1024 * 1024
     }
     if testConfig.TestSize < testConfig.BlockSize && testConfig.TestMode != "sequential" {
@@ -60,7 +59,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
         go func(dp string) {
             defer deviceWg.Done()
 
-            // Verify that this is a block device
             info, err := os.Stat(dp)
             if err != nil {
                 errorMsg := fmt.Sprintf("Device %s not accessible: %v", dp, err)
@@ -69,7 +67,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                 return
             }
 
-            // Check if it's a block device
             mode := info.Mode()
             if mode&os.ModeDevice == 0 {
                 errorMsg := fmt.Sprintf("%s is not a device", dp)
@@ -78,7 +75,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                 return
             }
 
-            // Try to open the device with write permissions to verify access
             device, err := os.OpenFile(dp, os.O_RDWR, 0)
             if err != nil {
                 errorMsg := fmt.Sprintf("Cannot open device %s for writing: %v (you may need root privileges)", dp, err)
@@ -88,7 +84,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
             }
             device.Close()
 
-            // Check device size
             device, err = os.OpenFile(dp, os.O_RDONLY, 0)
             if err != nil {
                 errorMsg := fmt.Sprintf("Cannot open device %s for reading: %v", dp, err)
@@ -98,7 +93,7 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
             }
 
             var deviceSize int64
-            fd := device.Fd() // Directly assign the file descriptor
+            fd := device.Fd()
             deviceSize, err = getDeviceSize(fd)
             if err != nil {
                 errorMsg := fmt.Sprintf("Failed to get size of device %s: %v", dp, err)
@@ -109,7 +104,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
             }
             device.Close()
 
-            // Validate test area
             if testConfig.StartOffset+testConfig.TestSize > deviceSize {
                 errorMsg := fmt.Sprintf("Test area exceeds device size on %s: device size is %s, requested offset %s plus test size %s",
                     dp, utils.FormatSize(deviceSize), utils.FormatSize(testConfig.StartOffset), utils.FormatSize(testConfig.TestSize))
@@ -191,7 +185,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                             utils.LogMessage(fmt.Sprintf("Raw disk read/verify on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
                                 dp, currentMode, iteration, readSpeedMBps, utils.FormatSize(testConfig.TestSize), readDuration), debug)
 
-                            // Update performance stats
                             perfStats.Lock()
                             diskPerfKey := fmt.Sprintf("raw:%s|%s|%d", dp, currentMode, testConfig.BlockSize)
                             found := false
@@ -206,6 +199,8 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                                         perfStats.RawDisk[i].WriteSpeed = writeSpeedMBps
                                         utils.LogMessage(fmt.Sprintf("Updated best write speed for %s: %.2f MB/s", diskPerfKey, writeSpeedMBps), debug)
                                     }
+                                    perfStats.RawDisk[i].WriteCount++
+                                    perfStats.RawDisk[i].ReadCount++
                                     found = true
                                     break
                                 }
@@ -218,9 +213,11 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                                     BlockSize:  testConfig.BlockSize,
                                     ReadSpeed:  readSpeedMBps,
                                     WriteSpeed: writeSpeedMBps,
+                                    WriteCount: 1,
+                                    ReadCount:  1,
                                 }
                                 perfStats.RawDisk = append(perfStats.RawDisk, newPerf)
-                                utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s", diskPerfKey, readSpeedMBps, writeSpeedMBps), debug)
+                                utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s, Operations: Write=1, Read=1", diskPerfKey, readSpeedMBps, writeSpeedMBps), debug)
                             }
                             perfStats.Unlock()
 
@@ -241,208 +238,201 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
 
 // getDeviceSize gets the size of a block device using ioctl
 func getDeviceSize(fd uintptr) (int64, error) {
-        // BLKGETSIZE64 ioctl to get device size in bytes
-        const BLKGETSIZE64 = 0x80081272
-        var size int64
-        _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, BLKGETSIZE64, uintptr(unsafe.Pointer(&size)))
-        if errno != 0 {
-                return 0, errno
-        }
-        return size, nil
+    const BLKGETSIZE64 = 0x80081272
+    var size int64
+    _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, BLKGETSIZE64, uintptr(unsafe.Pointer(&size)))
+    if errno != 0 {
+        return 0, errno
+    }
+    return size, nil
 }
 
 // performRawDiskWrite writes data to a raw disk device
 func performRawDiskWrite(devicePath string, data []byte, mode string, blockSize int64, startOffset int64) error {
-        if len(data) == 0 {
-                return fmt.Errorf("attempt to write empty data to device %s", devicePath)
+    if len(data) == 0 {
+        return fmt.Errorf("attempt to write empty data to device %s", devicePath)
+    }
+
+    device, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
+    if err != nil {
+        return fmt.Errorf("failed to open device for writing (%s): %w", devicePath, err)
+    }
+    defer device.Close()
+
+    totalSize := int64(len(data))
+    var totalBytesWritten int64 = 0
+
+    if mode == "sequential" {
+        n, writeErr := device.WriteAt(data, startOffset)
+        totalBytesWritten = int64(n)
+        if writeErr != nil {
+            return fmt.Errorf("sequential write error on %s after writing %d bytes at offset %d: %w",
+                devicePath, totalBytesWritten, startOffset, writeErr)
+        }
+        if totalBytesWritten != totalSize {
+            return fmt.Errorf("sequential write short write on %s: wrote %d bytes, expected %d",
+                devicePath, totalBytesWritten, totalSize)
+        }
+    } else {
+        blocks := totalSize / blockSize
+        if totalSize%blockSize > 0 {
+            blocks++
         }
 
-        device, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
-        if err != nil {
-                return fmt.Errorf("failed to open device for writing (%s): %w", devicePath, err)
+        blockOrder := make([]int64, blocks)
+        for i := int64(0); i < blocks; i++ {
+            blockOrder[i] = i
         }
-        defer device.Close()
+        source := rand.NewSource(time.Now().UnixNano())
+        rng := rand.New(source)
+        rng.Shuffle(int(blocks), func(i, j int) {
+            blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
+        })
 
-        totalSize := int64(len(data))
-        var totalBytesWritten int64 = 0
+        for _, blockIdx := range blockOrder {
+            dataStart := blockIdx * blockSize
+            dataEnd := dataStart + blockSize
+            if dataEnd > totalSize {
+                dataEnd = totalSize
+            }
+            chunkSize := dataEnd - dataStart
+            if chunkSize <= 0 {
+                continue
+            }
 
-        if mode == "sequential" {
-                // Sequential write at the given offset
-                n, writeErr := device.WriteAt(data, startOffset)
-                totalBytesWritten = int64(n)
-                if writeErr != nil {
-                        return fmt.Errorf("sequential write error on %s after writing %d bytes at offset %d: %w",
-                             devicePath, totalBytesWritten, startOffset, writeErr)
-                }
-                if totalBytesWritten != totalSize {
-                        return fmt.Errorf("sequential write short write on %s: wrote %d bytes, expected %d",
-                             devicePath, totalBytesWritten, totalSize)
-                }
-        } else {
-                // Random write in blocks
-                blocks := totalSize / blockSize
-                if totalSize%blockSize > 0 {
-                        blocks++
-                }
+            if dataStart >= int64(len(data)) || dataEnd > int64(len(data)) {
+                return fmt.Errorf("internal logic error: calculated range [%d:%d] exceeds data length %d",
+                    dataStart, dataEnd, len(data))
+            }
 
-                blockOrder := make([]int64, blocks)
-                for i := int64(0); i < blocks; i++ {
-                        blockOrder[i] = i
-                }
-                source := rand.NewSource(time.Now().UnixNano())
-                rng := rand.New(source)
-                rng.Shuffle(int(blocks), func(i, j int) {
-                        blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
-                })
-
-                for _, blockIdx := range blockOrder {
-                        dataStart := blockIdx * blockSize
-                        dataEnd := dataStart + blockSize
-                        if dataEnd > totalSize {
-                                dataEnd = totalSize
-                        }
-                        chunkSize := dataEnd - dataStart
-                        if chunkSize <= 0 {
-                                continue
-                        }
-
-                        if dataStart >= int64(len(data)) || dataEnd > int64(len(data)) {
-                                return fmt.Errorf("internal logic error: calculated range [%d:%d] exceeds data length %d",
-                                 dataStart, dataEnd, len(data))
-                        }
-
-                        deviceOffset := startOffset + dataStart
-                        n, writeErr := device.WriteAt(data[dataStart:dataEnd], deviceOffset)
-                        totalBytesWritten += int64(n)
-                        if writeErr != nil {
-                                return fmt.Errorf("random write error on %s at offset %d after writing %d bytes for this chunk: %w",
-                                 devicePath, deviceOffset, n, writeErr)
-                        }
-                        if int64(n) != chunkSize {
-                                return fmt.Errorf("random write short write on %s at offset %d: wrote %d bytes, expected %d",
-                                 devicePath, deviceOffset, n, chunkSize)
-                        }
-                }
-
-                if totalBytesWritten != totalSize {
-                        return fmt.Errorf("random write total bytes written mismatch: wrote %d bytes, expected %d for %s",
-                             totalBytesWritten, totalSize, devicePath)
-                }
+            deviceOffset := startOffset + dataStart
+            n, writeErr := device.WriteAt(data[dataStart:dataEnd], deviceOffset)
+            totalBytesWritten += int64(n)
+            if writeErr != nil {
+                return fmt.Errorf("random write error on %s at offset %d after writing %d bytes for this chunk: %w",
+                    devicePath, deviceOffset, n, writeErr)
+            }
+            if int64(n) != chunkSize {
+                return fmt.Errorf("random write short write on %s at offset %d: wrote %d bytes, expected %d",
+                    devicePath, deviceOffset, n, chunkSize)
+            }
         }
 
-        // Flush data to ensure it's written to the physical device
-        if err := device.Sync(); err != nil {
-                return fmt.Errorf("failed to sync device (%s) after writing %d bytes: %w",
-                         devicePath, totalBytesWritten, err)
+        if totalBytesWritten != totalSize {
+            return fmt.Errorf("random write total bytes written mismatch: wrote %d bytes, expected %d for %s",
+                totalBytesWritten, totalSize, devicePath)
         }
+    }
 
-        return nil
+    if err := device.Sync(); err != nil {
+        return fmt.Errorf("failed to sync device (%s) after writing %d bytes: %w",
+            devicePath, totalBytesWritten, err)
+    }
+
+    return nil
 }
 
 // performRawDiskReadAndVerify reads and verifies data from a raw disk device
 func performRawDiskReadAndVerify(devicePath string, originalData []byte, mode string, blockSize int64, startOffset int64) error {
-        expectedSize := int64(len(originalData))
-        if expectedSize == 0 {
-                return nil
-        }
-
-        device, err := os.Open(devicePath)
-        if err != nil {
-                return fmt.Errorf("failed to open device for reading (%s): %w", devicePath, err)
-        }
-        defer device.Close()
-
-        readData := make([]byte, expectedSize)
-
-        if mode == "sequential" {
-                // Sequential read at the given offset
-                n, readErr := device.ReadAt(readData, startOffset)
-                if readErr != nil && readErr != io.EOF {
-                        return fmt.Errorf("sequential read error on %s after reading %d bytes at offset %d: %w",
-                             devicePath, n, startOffset, readErr)
-                }
-                if int64(n) != expectedSize {
-                        return fmt.Errorf("sequential read short read on %s: read %d bytes, expected %d",
-                             devicePath, n, expectedSize)
-                }
-        } else {
-                // Random read in blocks
-                blocks := expectedSize / blockSize
-                if expectedSize%blockSize > 0 {
-                        blocks++
-                }
-
-                blockOrder := make([]int64, blocks)
-                for i := int64(0); i < blocks; i++ {
-                        blockOrder[i] = i
-                }
-                source := rand.NewSource(time.Now().UnixNano() + 1) // Different seed than write
-                rng := rand.New(source)
-                rng.Shuffle(int(blocks), func(i, j int) {
-                        blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
-                })
-
-                var totalBytesRead int64 = 0
-                for _, blockIdx := range blockOrder {
-                        dataStart := blockIdx * blockSize
-                        dataEnd := dataStart + blockSize
-                        if dataEnd > expectedSize {
-                                dataEnd = expectedSize
-                        }
-                        chunkSize := dataEnd - dataStart
-                        if chunkSize <= 0 {
-                                continue
-                        }
-
-                        if dataStart >= int64(len(readData)) || dataEnd > int64(len(readData)) {
-                                return fmt.Errorf("internal logic error during random read: calculated range [%d:%d] exceeds buffer length %d",
-                                 dataStart, dataEnd, len(readData))
-                        }
-
-                        deviceOffset := startOffset + dataStart
-                        n, readErr := device.ReadAt(readData[dataStart:dataEnd], deviceOffset)
-                        totalBytesRead += int64(n)
-
-                        if int64(n) != chunkSize {
-                                return fmt.Errorf("random read short read on %s at offset %d: read %d bytes, expected %d (error: %v)",
-                                 devicePath, deviceOffset, n, chunkSize, readErr)
-                        }
-
-                        if readErr != nil && readErr != io.EOF {
-                                return fmt.Errorf("random read error on %s at offset %d after reading %d bytes for this chunk: %w",
-                                 devicePath, deviceOffset, n, readErr)
-                        }
-                }
-        }
-
-        // Verify the data
-        if !bytes.Equal(originalData, readData) {
-                mismatchPos := int64(-1)
-                var originalByte, readByte byte
-                limit := len(originalData)
-                if len(readData) < limit {
-                        limit = len(readData)
-                }
-
-                for i := 0; i < limit; i++ {
-                        if originalData[i] != readData[i] {
-                                mismatchPos = int64(i)
-                                originalByte = originalData[i]
-                                readByte = readData[i]
-                                break
-                        }
-                }
-                if mismatchPos == -1 && len(originalData) != len(readData) {
-                        mismatchPos = int64(limit)
-                        if len(originalData) > limit {
-                                originalByte = originalData[limit]
-                        }
-                }
-
-                return fmt.Errorf("data verification failed for device %s: read data does not match original data "+
-                        "(lengths: original=%d, read=%d). First mismatch at byte %d (original: %d[0x%X], read: %d[0x%X])",
-                        devicePath, len(originalData), len(readData), mismatchPos, originalByte, originalByte, readByte, readByte)
-        }
-
+    expectedSize := int64(len(originalData))
+    if expectedSize == 0 {
         return nil
+    }
+
+    device, err := os.Open(devicePath)
+    if err != nil {
+        return fmt.Errorf("failed to open device for reading (%s): %w", devicePath, err)
+    }
+    defer device.Close()
+
+    readData := make([]byte, expectedSize)
+
+    if mode == "sequential" {
+        n, readErr := device.ReadAt(readData, startOffset)
+        if readErr != nil && readErr != io.EOF {
+            return fmt.Errorf("sequential read error on %s after reading %d bytes at offset %d: %w",
+                devicePath, n, startOffset, readErr)
+        }
+        if int64(n) != expectedSize {
+            return fmt.Errorf("sequential read short read on %s: read %d bytes, expected %d",
+                devicePath, n, expectedSize)
+        }
+    } else {
+        blocks := expectedSize / blockSize
+        if expectedSize%blockSize > 0 {
+            blocks++
+        }
+
+        blockOrder := make([]int64, blocks)
+        for i := int64(0); i < blocks; i++ {
+            blockOrder[i] = i
+        }
+        source := rand.NewSource(time.Now().UnixNano() + 1)
+        rng := rand.New(source)
+        rng.Shuffle(int(blocks), func(i, j int) {
+            blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
+        })
+
+        var totalBytesRead int64 = 0
+        for _, blockIdx := range blockOrder {
+            dataStart := blockIdx * blockSize
+            dataEnd := dataStart + blockSize
+            if dataEnd > expectedSize {
+                dataEnd = expectedSize
+            }
+            chunkSize := dataEnd - dataStart
+            if chunkSize <= 0 {
+                continue
+            }
+
+            if dataStart >= int64(len(readData)) || dataEnd > int64(len(readData)) {
+                return fmt.Errorf("internal logic error during random read: calculated range [%d:%d] exceeds buffer length %d",
+                    dataStart, dataEnd, len(readData))
+            }
+
+            deviceOffset := startOffset + dataStart
+            n, readErr := device.ReadAt(readData[dataStart:dataEnd], deviceOffset)
+            totalBytesRead += int64(n)
+
+            if int64(n) != chunkSize {
+                return fmt.Errorf("random read short read on %s at offset %d: read %d bytes, expected %d (error: %v)",
+                    devicePath, deviceOffset, n, chunkSize, readErr)
+            }
+
+            if readErr != nil && readErr != io.EOF {
+                return fmt.Errorf("random read error on %s at offset %d after reading %d bytes for this chunk: %w",
+                    devicePath, deviceOffset, n, readErr)
+            }
+        }
+    }
+
+    if !bytes.Equal(originalData, readData) {
+        mismatchPos := int64(-1)
+        var originalByte, readByte byte
+        limit := len(originalData)
+        if len(readData) < limit {
+            limit = len(readData)
+        }
+
+        for i := 0; i < limit; i++ {
+            if originalData[i] != readData[i] {
+                mismatchPos = int64(i)
+                originalByte = originalData[i]
+                readByte = readData[i]
+                break
+            }
+        }
+        if mismatchPos == -1 && len(originalData) != len(readData) {
+            mismatchPos = int64(limit)
+            if len(originalData) > limit {
+                originalByte = originalData[limit]
+            }
+        }
+
+        return fmt.Errorf("data verification failed for device %s: read data does not match original data "+
+            "(lengths: original=%d, read=%d). First mismatch at byte %d (original: %d[0x%X], read: %d[0x%X])",
+            devicePath, len(originalData), len(readData), mismatchPos, originalByte, originalByte, readByte, readByte)
+    }
+
+    return nil
 }
