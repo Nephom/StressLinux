@@ -4,83 +4,85 @@ A high-performance system stress testing tool written in Go, designed for testin
 
 ## Features
 
-- CPU load testing  
-- Memory usage stress test  
-- Filesystem performance test (mount points)  
-- Raw disk read/write test (with block size, offset, and mode control)  
-- Configurable test durations and resource usage  
-- Sequential and random modes for I/O testing  
-- Debug mode for detailed step logging  
+* CPU load testing with adjustable intensity (High, Low, Default)
+* Memory usage stress test with fine-grained percentage control
+* Filesystem performance test on specified mount points
+* Raw disk read/write test with configurable block size, test size, offset, and mode
+* Configurable test durations and resource usage
+* Sequential and random modes for I/O testing
+* Detailed performance statistics, including operation counts
+* Debug mode for detailed step logging
+* System resource information display
 
 ## Installation
 
-```bash
+```
 git clone https://github.com/yourname/StressLinux.git
 cd StressLinux
 go build -o stress
+```
 
 [Optional] If you don't set -d parameter and want to check debug message.
-echo "{\"debug\": true} > config.json
+```
+echo "{\"debug\": true}" > config.json
 ```
 
 ## Usage
 
-```bash
+```
 ./stress [options]
 ```
 
-### Available Options
+## Available Options
 
-| Flag         | Description                                                                 |
-|--------------|-----------------------------------------------------------------------------|
-| `-cpu`       | Enable CPU stress testing                                                   |
-| `-cpu-cores`       | Number of CPU cores to stress (0 means all cores)                                                   |
-| `-memory`    | Memory testing percentage (1-9 for 10%-90%, 1.5 for 15%, etc.)              |
-| `-l`         | Comma-separated mount points to test (e.g., `/mnt/disk1,/mnt/disk2`)        |
-| `-disk`      | Raw disk devices to test (e.g., `/dev/sdb`, `/dev/nvme0n1`)                 |
-| `-diskblock` | Block size (bytes) for raw disk testing (default: `4096`)                   |
-| `-disksize`  | Amount of bytes to test on each raw disk device (default: `104857600`)      |
-| `-diskoffset`| Start offset (bytes) from the beginning of the device (default: `1GB`)      |
-| `-diskmode`  | Raw disk test mode: `sequential`, `random`, or `both` (default: `both`)     |
-| `-mode`      | Filesystem test mode: `sequential`, `random`, or `both` (default: `both`)   |
-| `-size`      | File size for mount point testing (supports `K`, `M`, `G` units, default: `10MB`) |
-| `-block`     | Comma-separated block sizes for disk ops (e.g., `4K,1M`, default: `4K`)     |
-| `-duration`  | Total duration of the test (e.g., `30s`, `5m`, `1h`, default: `10m`)         |
-| `-d`         | Enable debug mode                                                           |
-| `-h`         | Show help                                                                   |
-| `-list` or `-print`         | Show System resource info                                                                   |
+| Flag | Description |
+|------|-------------|
+| `-cpu` | Enable CPU stress testing |
+| `-cpu-cores` | Number of CPU cores to stress (0 means all cores, default: 0) |
+| `-cpu-load` | CPU load level: High (2x load), Low (0.25x load), or Default (standard load, default: Default) |
+| `-memory` | Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%, default: 0) |
+| `-l` | Comma-separated mount points to test (e.g., /mnt/disk1,/mnt/disk2) |
+| `-disk` | Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1) |
+| `-diskblock` | Block size for raw disk testing (e.g., 4K, 1M, supports K, M, G units, default: 4K) |
+| `-disksize` | Size to test on each raw disk device (e.g., 100M, 1G, supports K, M, G units, default: 100M) |
+| `-diskoffset` | Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units, default: 1G) |
+| `-diskmode` | Raw disk test mode: sequential, random, or both (default: both) |
+| `-mode` | Filesystem test mode: sequential, random, or both (default: both) |
+| `-size` | File size for mount point testing (e.g., 10M, 1G, supports K, M, G units, default: 10M) |
+| `-block` | Comma-separated block sizes for disk operations (e.g., 4K,1M, supports K, M, G units, default: 4K) |
+| `-duration` | Total duration of the test (e.g., 30s, 5m, 1h, default: 10m) |
+| `-d` | Enable debug mode |
+| `-h` | Show help |
+| `-list` or `-print` | Show system resource information |
+| `-numa` | NUMA node to stress (e.g., 0 or 1; default -1 means all nodes) |
 
-> **Note:** At least one of `-cpu`, `-memory`, `-l`, or `-disk` must be specified.
+**Note:** At least one of `-cpu`, `-memory`, `-l`, or `-disk` must be specified.
 
 ## Example Usages
 
-Test CPU and memory:
-
-```bash
-./stress -cpu -memory 2.5 -duration 5m
+Test CPU with high load and memory:
+```
+./stress -cpu -cpu-load High -memory 2.5 -duration 5m
 ```
 
 Test raw disk with custom block size and offset:
-
-```bash
-./stress -disk /dev/nvme0n1 -diskblock 4096 -disksize 209715200 -diskoffset 1073741824
+```
+./stress -disk /dev/nvme0n1 -diskblock 4K -disksize 200M -diskoffset 1G
 ```
 
 Filesystem I/O test on mount points:
-
-```bash
-./stress -l /mnt/ssd1,/mnt/ssd2 -size 100MB -block 1M,4K
+```
+./stress -l /mnt/ssd1,/mnt/ssd2 -size 100M -block 1M,4K
 ```
 
 Enable debug logs:
-
-```bash
+```
 ./stress -cpu -d
 ```
 
 ## License
 
-MIT License. See [LICENSE](./LICENSE) for details.
+MIT License. See LICENSE for details.
 
 ## Contributing
 
