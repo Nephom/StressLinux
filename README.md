@@ -39,14 +39,11 @@ echo "{\"debug\": true}" > config.json
 |------|-------------|
 | `-cpu` | Enable CPU stress testing |
 | `-cpu-cores` | Number of CPU cores to stress (0 means all cores, default: 0) |
-| `-cpu-load` | CPU load level: High (2x load), Low (0.25x load), or Default (standard load, default: Default) |
+| `-cpu-load` | CPU load level: High (2), Low (1), or Default (0) |
 | `-memory` | Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%, default: 0) |
 | `-l` | Comma-separated mount points to test (e.g., /mnt/disk1,/mnt/disk2) |
 | `-disk` | Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1) |
-| `-diskblock` | Block size for raw disk testing (e.g., 4K, 1M, supports K, M, G units, default: 4K) |
-| `-disksize` | Size to test on each raw disk device (e.g., 100M, 1G, supports K, M, G units, default: 100M) |
 | `-diskoffset` | Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units, default: 1G) |
-| `-diskmode` | Raw disk test mode: sequential, random, or both (default: both) |
 | `-mode` | Filesystem test mode: sequential, random, or both (default: both) |
 | `-size` | File size for mount point testing (e.g., 10M, 1G, supports K, M, G units, default: 10M) |
 | `-block` | Comma-separated block sizes for disk operations (e.g., 4K,1M, supports K, M, G units, default: 4K) |
