@@ -36,9 +36,6 @@ func main() {
     var testMode string
     var blockSizes string
     var rawDiskPaths stringSliceFlag
-    var rawDiskTestSize string
-    var rawDiskBlockSize string
-    var rawDiskTestMode string
     var rawDiskStartOffset string
     var duration string
     var testCPU bool
@@ -52,17 +49,14 @@ func main() {
 
     flag.StringVar(&mountPoints, "l", "", "Comma separated mount points to test (e.g. /mnt/disk1,/mnt/disk2)")
     flag.Var(&rawDiskPaths, "disk", "Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1)")
-    flag.StringVar(&fileSize, "size", "10MB", "Size of test files (supports K, M, G units)")
-    flag.StringVar(&testMode, "mode", "both", "Test mode: sequential, random, or both")
-    flag.StringVar(&blockSizes, "block", "4K", "Comma separated block sizes for disk operations (supports K, M, G units)")
-    flag.StringVar(&rawDiskTestSize, "disksize", "100M", "Size to test on each raw disk device (e.g., 100M, 1G, supports K, M, G units)")
-    flag.StringVar(&rawDiskBlockSize, "diskblock", "4K", "Block size for raw disk device testing (e.g., 4K, 1M, supports K, M, G units)")
-    flag.StringVar(&rawDiskTestMode, "diskmode", "both", "Test mode for raw disk device: 'sequential', 'random', or 'both'")
+    flag.StringVar(&fileSize, "size", "10MB", "Size of test files for disk tests or test size for raw disk tests (supports K, M, G units)")
+    flag.StringVar(&testMode, "mode", "both", "Test mode for disk and raw disk: sequential, random, or both")
+    flag.StringVar(&blockSizes, "block", "4K", "Comma separated block sizes for disk and raw disk operations (supports K, M, G units)")
     flag.StringVar(&rawDiskStartOffset, "diskoffset", "1G", "Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units)")
     flag.StringVar(&duration, "duration", "10m", "Test duration (e.g. 30s, 5m, 1h)")
     flag.BoolVar(&testCPU, "cpu", false, "Enable CPU testing")
     flag.IntVar(&cpuCores, "cpu-cores", 0, "Number of CPU cores to stress (0 means all cores)")
-    flag.StringVar(&cpuLoad, "cpu-load", "Default", "CPU load level: High (2x load), Low (0.25x load), or Default (standard load)")
+    flag.StringVar(&cpuLoad, "cpu-load", "Default", "CPU load level: High(2), Low(1), or Default(0)")
     flag.IntVar(&numaNode, "numa", -1, "NUMA node to stress (e.g., 0 or 1; default -1 means all nodes)")
     flag.Float64Var(&memoryPercent, "memory", 0, "Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%)")
     flag.BoolVar(&debugFlag, "d", false, "Enable debug mode")
@@ -80,27 +74,16 @@ func main() {
     }
 
     // 解析 RawDisk 參數
-    var rawDiskTestSizeBytes, rawDiskBlockSizeBytes, rawDiskStartOffsetBytes int64
-    if rawDiskTestSize != "" {
-        size, err := utils.ParseSize(rawDiskTestSize)
+	var fileSizeBytes, rawDiskStartOffsetBytes int64
+    if fileSize != "" {
+        size, err := utils.ParseSize(fileSize)
         if err != nil {
-            utils.LogMessage(fmt.Sprintf("Error: Invalid -disksize '%s': %v", rawDiskTestSize, err), true)
+            utils.LogMessage(fmt.Sprintf("Error: Invalid -size '%s': %v", fileSize, err), true)
             os.Exit(1)
         }
-        rawDiskTestSizeBytes = size
+        fileSizeBytes = size
     } else {
-        rawDiskTestSizeBytes = 100 * 1024 * 1024
-    }
-
-    if rawDiskBlockSize != "" {
-        size, err := utils.ParseSize(rawDiskBlockSize)
-        if err != nil {
-            utils.LogMessage(fmt.Sprintf("Error: Invalid -diskblock '%s': %v", rawDiskBlockSize, err), true)
-            os.Exit(1)
-        }
-        rawDiskBlockSizeBytes = size
-    } else {
-        rawDiskBlockSizeBytes = 4 * 1024
+        fileSizeBytes = 10 * 1024 * 1024 // 10MB default
     }
 
     if rawDiskStartOffset != "" {
@@ -111,7 +94,21 @@ func main() {
         }
         rawDiskStartOffsetBytes = offset
     } else {
-        rawDiskStartOffsetBytes = 1024 * 1024 * 1024
+        rawDiskStartOffsetBytes = 1024 * 1024 * 1024 // 1GB default
+    }
+
+	// 如果有原始磁碟，檢查每個磁碟的大小
+    rawDiskSizes := make(map[string]int64)
+    if len(rawDiskPaths) > 0 {
+        for _, devicePath := range rawDiskPaths {
+            size, err := utils.GetDiskSize(devicePath)
+            if err != nil {
+                utils.LogMessage(fmt.Sprintf("Error: Failed to get size for device %s: %v", devicePath, err), true)
+                os.Exit(1)
+            }
+            rawDiskSizes[devicePath] = size
+            utils.LogMessage(fmt.Sprintf("Detected size for device %s: %s", devicePath, utils.FormatSize(size)), true)
+        }
     }
 
     if printSystemInfo {
@@ -127,7 +124,7 @@ func main() {
         flag.PrintDefaults()
         fmt.Println("\nNotes:")
         fmt.Println("- At least one of -cpu, -memory, -l, -disk must be specified.")
-        fmt.Println("- Use -cpu-load to adjust CPU test intensity: 'High' (2x load), 'Low' (0.25x load), or 'Default' (standard load).")
+        fmt.Println("- Use -cpu-load to adjust CPU test intensity: 'High(2)', 'Low(1)', or 'Default(0)'.")
         fmt.Println("- Use -print or -list to view available system resources.")
         return
     }
@@ -186,19 +183,6 @@ func main() {
         go memory.RunMemoryStressTest(&wg, stop, errorChan, memConfig, perfStats)
     }
 
-    // Mount point disk tests
-    var mounts []string
-    if mountPoints != "" {
-        mounts = strings.Split(mountPoints, ",")
-        utils.LogMessage(fmt.Sprintf("Starting disk tests on mount points: %v", mounts), debug)
-    }
-
-    fileSizeBytes, err := utils.ParseSize(fileSize)
-    if err != nil {
-        utils.LogMessage(fmt.Sprintf("Invalid file size: %v, using default 10MB", err), true)
-        fileSizeBytes = 10 * 1024 * 1024
-    }
-
     var testModes []string
     switch testMode {
     case "sequential":
@@ -227,7 +211,12 @@ func main() {
         blockSizeList = append(blockSizeList, 4*1024)
     }
 
-    if len(mounts) > 0 {
+	// Mount point disk tests
+    var mounts []string
+    if mountPoints != "" {
+        mounts = strings.Split(mountPoints, ",")
+        utils.LogMessage(fmt.Sprintf("Starting disk tests on mount points: %v", mounts), debug)
+
         for _, mode := range testModes {
             for _, bs := range blockSizeList {
                 bsDisplay := utils.FormatSize(bs)
@@ -247,45 +236,54 @@ func main() {
         }
     }
 
-    // Raw disk tests
+	// Raw disk tests
     if len(rawDiskPaths) > 0 {
         if os.Geteuid() != 0 {
             utils.LogMessage("Warning: Raw disk tests (-disk) typically require root privileges.", true)
             utils.LogMessage("You may not have sufficient permissions to perform these tests.", true)
         }
 
-        var rawTestModes []string
-        switch rawDiskTestMode {
-        case "sequential":
-            rawTestModes = []string{"sequential"}
-        case "random":
-            rawTestModes = []string{"random"}
-        case "both":
-            rawTestModes = []string{"sequential", "random"}
-        default:
-            utils.LogMessage(fmt.Sprintf("Invalid raw disk test mode: %s, using both", rawDiskTestMode), true)
-            rawTestModes = []string{"sequential", "random"}
-        }
+        for _, mode := range testModes {
+            for _, bs := range blockSizeList {
+                for _, devicePath := range rawDiskPaths {
+                    // 獲取磁碟大小
+                    diskSize, ok := rawDiskSizes[devicePath]
+                    if !ok {
+                        utils.LogMessage(fmt.Sprintf("Error: Size not found for device %s", devicePath), true)
+                        continue
+                    }
 
-        for _, mode := range rawTestModes {
-            rawDiskTestConfig := rawdisk.RawDiskTestConfig{
-                DevicePaths: rawDiskPaths,
-                TestSize:    rawDiskTestSizeBytes,
-                BlockSize:   rawDiskBlockSizeBytes,
-                TestMode:    mode,
-                StartOffset: rawDiskStartOffsetBytes,
+                    // 計算可用大小（考慮 StartOffset）
+                    availableSize := diskSize - rawDiskStartOffsetBytes
+                    if availableSize <= 0 {
+                        utils.LogMessage(fmt.Sprintf("Error: Start offset %s exceeds size %s for device %s",
+                            utils.FormatSize(rawDiskStartOffsetBytes), utils.FormatSize(diskSize), devicePath), true)
+                        continue
+                    }
+
+                    // 限制 TestSize 不超過可用大小
+                    testSize := fileSizeBytes
+                    if testSize > availableSize {
+                        testSize = availableSize
+                        utils.LogMessage(fmt.Sprintf("Warning: Test size %s exceeds available size %s for device %s, capping at %s",
+                            utils.FormatSize(fileSizeBytes), utils.FormatSize(availableSize), devicePath, utils.FormatSize(testSize)), true)
+                    }
+
+                    rawDiskTestConfig := rawdisk.RawDiskTestConfig{
+                        DevicePaths: []string{devicePath}, // 單獨測試每個設備
+                        TestSize:    testSize,
+                        BlockSize:   bs,
+                        TestMode:    mode,
+                        StartOffset: rawDiskStartOffsetBytes,
+                    }
+
+                    utils.LogMessage(fmt.Sprintf("Starting raw disk test on device %s: Test size: %s, Block size: %s, Mode: %s, Start offset: %s",
+                        devicePath, utils.FormatSize(testSize), utils.FormatSize(bs), mode, utils.FormatSize(rawDiskStartOffsetBytes)), debug)
+
+                    wg.Add(1)
+                    go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug)
+                }
             }
-
-            utils.LogMessage(fmt.Sprintf("Starting raw disk tests on %d devices: %v",
-                len(rawDiskPaths), rawDiskPaths), debug)
-            utils.LogMessage(fmt.Sprintf("Test size: %s, Block size: %s, Mode: %s, Start offset: %s",
-                utils.FormatSize(rawDiskTestSizeBytes),
-                utils.FormatSize(rawDiskBlockSizeBytes),
-                mode,
-                utils.FormatSize(rawDiskStartOffsetBytes)), debug)
-
-            wg.Add(1)
-            go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug)
         }
     }
 

@@ -28,7 +28,7 @@ func adjustBatchSize(baseBatchSize int, loadLevel string) int {
     case "high", "2":
         adjusted = baseBatchSize * 2
     case "low", "1":
-        adjusted = baseBatchSize / 4 // 0.25x
+        adjusted = baseBatchSize / 100
     case "default", "0", "":
         adjusted = baseBatchSize
     default:
@@ -112,6 +112,7 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
 }
 
 // runAllTestsPerCore runs all test types sequentially in one goroutine per core
+/*
 func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
     if debug {
         utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)
@@ -137,17 +138,17 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         }
     }
 
-    testFuncs := []struct {
+	testFuncs := []struct {
         name   string
         fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
-        weight float64
+	    weight float64
     }{
         {"integer", runIntegerComputationParallel, 0.2},
         {"float", runFloatComputationParallel, 0.2},
         {"vector", runVectorComputationParallel, 0.2},
-        {"cache", runCacheStressParallel, 0.2},
+        {"cache", runCacheStressParallel, 0.1},
         {"branch", runBranchPredictionParallel, 0.15},
-        {"crypto", runCryptoStressParallel, 0.05},
+        {"crypto", runCryptoStressParallel, 0.15},
     }
 
     cycleDuration := 50 * time.Millisecond
@@ -167,6 +168,182 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
             }
         }
     }
+}
+*/
+
+func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
+    if debug {
+        utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)
+    }
+
+    runtime.LockOSThread()
+    cpuset := unix.CPUSet{}
+    cpuset.Set(cpuID)
+    err := unix.SchedSetaffinity(0, &cpuset)
+    if err != nil {
+        utils.LogMessage(fmt.Sprintf("Failed to set CPU affinity for CPU %d: %v (may require root privileges)", cpuID, err), true)
+    } else if debug {
+        utils.LogMessage(fmt.Sprintf("Successfully set CPU affinity for CPU %d", cpuID), debug)
+    }
+
+    if debug {
+        var actualSet unix.CPUSet
+        err := unix.SchedGetaffinity(0, &actualSet)
+        if err != nil {
+            utils.LogMessage(fmt.Sprintf("Failed to get CPU affinity for CPU %d: %v", cpuID, err), debug)
+        } else {
+            utils.LogMessage(fmt.Sprintf("Actual CPU affinity for CPU %d: %v", cpuID, actualSet), debug)
+        }
+    }
+
+    // 定義所有可用的測試項目及其參考權重
+    allTests := map[string]struct {
+        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+        weight float64
+    }{
+        "integer": {runIntegerComputationParallel, 0.2},
+        "float":   {runFloatComputationParallel, 0.2},
+        "vector":  {runVectorComputationParallel, 0.2},
+        "cache":   {runCacheStressParallel, 0.1},
+        "branch":  {runBranchPredictionParallel, 0.15},
+        "crypto":  {runCryptoStressParallel, 0.15},
+    }
+
+    // 定義每個 loadLevel 的測試項目和權重
+    type testConfig struct {
+        name   string
+        weight float64
+    }
+
+    loadLevelConfigs := map[string][]testConfig{
+        "high": {
+            {"integer", 0.1},
+            {"float", 0.2},
+            {"vector", 0.2},
+            {"cache", 0.2},
+            {"branch", 0.15},
+            {"crypto", 0.15},
+        },
+        "low": {
+            {"integer", 0.2},
+            {"float", 0.3},
+        },
+        "default": {
+            {"float", 0.2},
+            {"vector", 0.2},
+            {"cache", 0.2},
+            {"branch", 0.2},
+            {"crypto", 0.2},
+        },
+    }
+
+    // 選擇測試項目
+    var selectedTests []struct {
+        name   string
+        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+        weight float64
+    }
+
+    // 根據 loadLevel 選擇配置
+    configKey := strings.ToLower(loadLevel)
+    switch configKey {
+    case "high", "2":
+        configKey = "high"
+    case "low", "1":
+        configKey = "low"
+    case "default", "0", "":
+        configKey = "default"
+    default:
+        utils.LogMessage(fmt.Sprintf("Invalid CPU load level: %s, using Default", loadLevel), true)
+        configKey = "default"
+    }
+
+    // 從配置中構建 selectedTests
+    tests, exists := loadLevelConfigs[configKey]
+    if !exists {
+        utils.LogMessage(fmt.Sprintf("No config for load level %s, using Default", configKey), true)
+        tests = loadLevelConfigs["default"]
+    }
+
+    // 計算權重總和
+    totalWeight := 0.0
+    for _, test := range tests {
+        totalWeight += test.weight
+    }
+
+    // 僅對 high 正規化權重
+    normalize := configKey == "high" && totalWeight != 0 && totalWeight != 1.0
+
+    for _, test := range tests {
+        testFn, ok := allTests[test.name]
+        if !ok {
+            utils.LogMessage(fmt.Sprintf("Test %s not found in allTests, skipping", test.name), true)
+            continue
+        }
+        weight := test.weight
+        if normalize {
+            weight = test.weight / totalWeight // 僅 high 正規化
+        }
+        selectedTests = append(selectedTests, struct {
+            name   string
+            fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+            weight float64
+        }{test.name, testFn.fn, weight})
+    }
+
+    if len(selectedTests) == 0 {
+        utils.LogMessage(fmt.Sprintf("No valid tests selected for CPU %d, exiting", cpuID), true)
+        runtime.UnlockOSThread()
+        return
+    }
+
+    // 記錄選定的測試、權重和預計循環時間
+    cycleDuration := 50 * time.Millisecond
+    if debug {
+        usedTime := time.Duration(float64(cycleDuration) * totalWeight)
+        if normalize {
+            usedTime = cycleDuration // high 正規化後用滿
+        }
+        utils.LogMessage(fmt.Sprintf("CPU %d: Load level %s, running %d tests: %v, expected cycle time: %v", cpuID, configKey, len(selectedTests), getTestNames(selectedTests), usedTime), debug)
+    }
+
+    for {
+        select {
+        case <-stop:
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Stress tests on CPU %d completed", cpuID), debug)
+            }
+            runtime.UnlockOSThread()
+            return
+        default:
+            start := time.Now()
+            for _, test := range selectedTests {
+                testBudget := time.Duration(float64(cycleDuration) * test.weight)
+                test.fn(stop, errorChan, cpuID, perfStats, debug, loadLevel, testBudget)
+            }
+            // 為 low 和 default 添加閒置時間
+            if configKey != "high" && totalWeight < 1.0 {
+                idleTime := time.Duration(float64(cycleDuration) * (1.0 - totalWeight))
+                time.Sleep(idleTime)
+            }
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU %d: Actual cycle time: %v", cpuID, time.Since(start)), debug)
+            }
+        }
+    }
+}
+
+// 輔助函數：取得測試名稱和權重
+func getTestNames(tests []struct {
+    name   string
+    fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+    weight float64
+}) []string {
+    names := make([]string, len(tests))
+    for i, test := range tests {
+        names[i] = fmt.Sprintf("%s(%.2f)", test.name, test.weight)
+    }
+    return names
 }
 
 // runIntegerComputationParallel performs intensive integer operations
@@ -286,7 +463,7 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
     operationCount := uint64(0)
 
     const vectorSize = 1024
-    baseBatchSize := 1000
+    baseBatchSize := 10000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
 
     vecA := make([]float64, vectorSize)
@@ -528,7 +705,7 @@ func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuI
     operationCount := uint64(0)
 
     const blockSize = 1024 * 1024
-    baseBatchSize := 100
+    baseBatchSize := 10000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
 
     rng := utils.NewRand(int64(cpuID))

@@ -12,6 +12,8 @@ import (
     "time"
     "math/rand"
     "stress/config"
+	"unsafe"
+	"syscall"
 
 )
 
@@ -294,4 +296,26 @@ func ParseCacheSize(sizeStr string) (int64, error) {
     default:
         return 0, fmt.Errorf("unknown cache size unit: %s", unit)
     }
+}
+
+// getDiskSize 返回指定磁碟設備的總大小（以字節為單位）
+func GetDiskSize(devicePath string) (int64, error) {
+    file, err := os.OpenFile(devicePath, os.O_RDONLY, 0)
+    if err != nil {
+        return 0, fmt.Errorf("failed to open device %s: %v", devicePath, err)
+    }
+    defer file.Close()
+
+    var size int64
+    _, _, errno := syscall.Syscall(
+        syscall.SYS_IOCTL,
+        file.Fd(),
+        0x80081272, // BLKGETSIZE64
+        uintptr(unsafe.Pointer(&size)),
+    )
+    if errno != 0 {
+        return 0, fmt.Errorf("ioctl BLKGETSIZE64 failed for %s: %v", devicePath, errno)
+    }
+
+    return size, nil
 }
