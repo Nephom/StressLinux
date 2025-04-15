@@ -112,65 +112,6 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
 }
 
 // runAllTestsPerCore runs all test types sequentially in one goroutine per core
-/*
-func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
-    if debug {
-        utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)
-    }
-
-    runtime.LockOSThread()
-    cpuset := unix.CPUSet{}
-    cpuset.Set(cpuID)
-    err := unix.SchedSetaffinity(0, &cpuset)
-    if err != nil {
-        utils.LogMessage(fmt.Sprintf("Failed to set CPU affinity for CPU %d: %v (may require root privileges)", cpuID, err), true)
-    } else if debug {
-        utils.LogMessage(fmt.Sprintf("Successfully set CPU affinity for CPU %d", cpuID), debug)
-    }
-
-    if debug {
-        var actualSet unix.CPUSet
-        err := unix.SchedGetaffinity(0, &actualSet)
-        if err != nil {
-            utils.LogMessage(fmt.Sprintf("Failed to get CPU affinity for CPU %d: %v", cpuID, err), debug)
-        } else {
-            utils.LogMessage(fmt.Sprintf("Actual CPU affinity for CPU %d: %v", cpuID, actualSet), debug)
-        }
-    }
-
-	testFuncs := []struct {
-        name   string
-        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
-	    weight float64
-    }{
-        {"integer", runIntegerComputationParallel, 0.2},
-        {"float", runFloatComputationParallel, 0.2},
-        {"vector", runVectorComputationParallel, 0.2},
-        {"cache", runCacheStressParallel, 0.1},
-        {"branch", runBranchPredictionParallel, 0.15},
-        {"crypto", runCryptoStressParallel, 0.15},
-    }
-
-    cycleDuration := 50 * time.Millisecond
-
-    for {
-        select {
-        case <-stop:
-            if debug {
-                utils.LogMessage(fmt.Sprintf("Stress tests on CPU %d completed", cpuID), debug)
-            }
-            runtime.UnlockOSThread()
-            return
-        default:
-            for _, test := range testFuncs {
-                testBudget := time.Duration(float64(cycleDuration) * test.weight)
-                test.fn(stop, errorChan, cpuID, perfStats, debug, loadLevel, testBudget)
-            }
-        }
-    }
-}
-*/
-
 func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
     if debug {
         utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)

@@ -5,7 +5,18 @@ import "sync"
 
 // Config structure
 type Config struct {
-    Debug bool `json:"debug"`
+    Debug      bool    `json:"debug"`
+    CPU        bool    `json:"CPU"`
+    Cores      int     `json:"Cores"`
+    Load       string  `json:"Load"`
+    Memory     bool    `json:"Memory"`
+    MEMPercent float64 `json:"MEMPercent"`
+    Mountpoint string  `json:"Mountpoint"`
+    RAWDisk    string  `json:"RAWDisk"`
+    Size       string  `json:"Size"`
+    Offset     string  `json:"Offset"`
+    Block      string  `json:"Block"`
+    Mode       string  `json:"Mode"`
 }
 
 // TestResult structure
