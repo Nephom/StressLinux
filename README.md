@@ -38,6 +38,7 @@ echo "{\"debug\": true}" > config.json
 | Flag | Description |
 |------|-------------|
 | `-cpu` | Enable CPU stress testing |
+| `-numa` | NUMA node to stress (e.g., 0 or 1; default -1 means all nodes) |
 | `-cpu-cores` | Number of CPU cores to stress (0 means all cores, default: 0) |
 | `-cpu-load` | CPU load level: High (2), Low (1), or Default (0) |
 | `-memory` | Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%, default: 0) |
@@ -51,7 +52,8 @@ echo "{\"debug\": true}" > config.json
 | `-d` | Enable debug mode |
 | `-h` | Show help |
 | `-list` or `-print` | Show system resource information |
-| `-numa` | NUMA node to stress (e.g., 0 or 1; default -1 means all nodes) |
+| `-scan` | Create auto-testConfig in config.json |
+
 
 **Note:** At least one of `-cpu`, `-memory`, `-l`, or `-disk` must be specified.
 
@@ -60,6 +62,30 @@ echo "{\"debug\": true}" > config.json
 Check system resource information
 ```
 ./stress -list
+```
+
+Scan System Resource to create test config.json.(Optional)
+```
+./stress -scan
+```
+
+Config.json contents by auto-configuration
+Example:
+```
+{
+    "debug": false,
+    "CPU": true,
+    "Cores": 4,
+    "Load": "Default",
+    "Memory": true,
+    "MEMPercent": 9.3,
+    "Mountpoint": "/mnt, /home/mainstorage",
+    "RAWDisk": "",
+    "Size": "10M",
+    "Offset": "1G",
+    "Block": "4K",
+    "Mode": "both"
+}
 ```
 
 Test CPU with high load and memory 25%:
