@@ -57,14 +57,29 @@ echo "{\"debug\": true}" > config.json
 
 ## Example Usages
 
-Test CPU with high load and memory:
+Check system resource information
+```
+./stress -list (or -print)
+```
+
+Test CPU with high load and memory 25%:
 ```
 ./stress -cpu -cpu-load High -memory 2.5 -duration 5m
+
+or
+
+./stress -cpu -cpu-load 2 -memory 2.5 -duration 5m
+```
+
+Test 2 CPU cores in Numa Node 1 and memory 20%:
+```
+./stress -cpu -cpu-cores 2 -numa 1 -memory 2 -duration 5m
+
 ```
 
 Test raw disk with custom block size and offset:
 ```
-./stress -disk /dev/nvme0n1 -diskblock 4K -disksize 200M -diskoffset 1G
+./stress -disk /dev/nvme0n1 -block 4K -size 200M -diskoffset 1G
 ```
 
 Filesystem I/O test on mount points:
