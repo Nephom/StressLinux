@@ -108,6 +108,12 @@ Test raw disk with custom block size and offset:
 ./stress -disk /dev/nvme0n1,/dev/nvme1n1 -block 4K -size 200M -diskoffset 1G
 ```
 
+- NOTICE!! The RAWDisk does not support both mode, if you want to stress mountpoint and rawdisk at the same time,
+  You must assign parameter mode as sequential or random not both.
+  ex: ./stress -disk /dev/sdb -l /mnt -size 100M -mode both ==> This is wrong mode selection.
+  The correct is: 
+  ./stress -disk /dev/sdb -l /mnt -size 100M -mode sequential or random
+
 ### Filesystem(s) stress
 Filesystem I/O test on mount points with sequential mode:
 ```

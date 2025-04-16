@@ -53,7 +53,7 @@ func main() {
     flag.StringVar(&mountPoints, "l", "", "Comma separated mount points to test (e.g. /mnt/disk1,/mnt/disk2)")
     flag.Var(&rawDiskPaths, "disk", "Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1)")
     flag.StringVar(&fileSize, "size", "", "Size of test files for disk tests or test size for raw disk tests (supports K, M, G units)")
-    flag.StringVar(&testMode, "mode", "", "Test mode for disk and raw disk: sequential, random, or both")
+    flag.StringVar(&testMode, "mode", "", "Test mode for disk and raw disk: sequential or random")
     flag.StringVar(&blockSizes, "block", "", "Comma separated block sizes for disk and raw disk operations (supports K, M, G units)")
     flag.StringVar(&rawDiskStartOffset, "diskoffset", "", "Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units)")
     flag.StringVar(&duration, "duration", "10m", "Test duration (e.g. 30s, 5m, 1h)")
@@ -69,11 +69,31 @@ func main() {
     flag.BoolVar(&scanFlag, "scan", false, "Scan system resources and update config.json")
     flag.Parse()
 
-    // 處理 -scan
+    // Handle exclusive flags first
+    if showHelp {
+        fmt.Println("System Stress Test Tool")
+        fmt.Println("Usage: stress [options]")
+        fmt.Println("\nOptions:")
+        flag.PrintDefaults()
+        fmt.Println("\nNotes:")
+        fmt.Println("- At least one of -cpu, -memory, -l, -disk must be specified for stress testing.")
+        fmt.Println("- Use -cpu-load to adjust CPU test intensity: 'High(2)', 'Low(1)', or 'Default(0)'.")
+        fmt.Println("- Use -print or -list to view available system resources.")
+        fmt.Println("- Use -scan to update config.json with system resources.")
+        fmt.Println("- Raw disk tests (-disk) require 'sequential' or 'random' mode; 'both' is not supported.")
+        return
+    }
+
+    if printSystemInfo {
+        info := systeminfo.GetSystemInfo()
+        systeminfo.PrintSystemInfo(info)
+        return
+    }
+
     if scanFlag {
         info := systeminfo.GetSystemInfo()
 
-        // 解析 CPUInfo 中的核心數
+        // Parse CPUInfo for core count
         coreCount := 0
         reCores := regexp.MustCompile(`Cores: (\d+)`)
         if match := reCores.FindStringSubmatch(info.CPUInfo); len(match) > 1 {
@@ -83,7 +103,7 @@ func main() {
             utils.LogMessage("Warning: Could not parse core count from CPUInfo, using runtime.NumCPU()", true)
         }
 
-        // 解析 MemoryInfo 中的 stress_percent
+        // Parse MemoryInfo for stress_percent
         memPercent := 0.0
         reMem := regexp.MustCompile(`\(([\d.]+)\)`)
         if match := reMem.FindStringSubmatch(info.MemoryInfo); len(match) > 1 {
@@ -93,7 +113,7 @@ func main() {
             utils.LogMessage("Warning: Could not parse memory stress percent from MemoryInfo, defaulting to 9.0 (90%)", true)
         }
 
-        // 解析 DiskMounts
+        // Parse DiskMounts
         mountPointsStr := ""
         reMounts := regexp.MustCompile(`Disk Mount Points Available for Stress: (.*)`)
         if match := reMounts.FindStringSubmatch(info.DiskMounts); len(match) > 1 {
@@ -102,7 +122,7 @@ func main() {
             utils.LogMessage("Warning: Could not parse mount points from DiskMounts, defaulting to empty", true)
         }
 
-        // 解析 RawDisks
+        // Parse RawDisks
         rawDisksStr := ""
         reRawDisks := regexp.MustCompile(`Raw Disks Available for Stress: (.*)`)
         if match := reRawDisks.FindStringSubmatch(info.RawDisks); len(match) > 1 {
@@ -111,7 +131,7 @@ func main() {
             utils.LogMessage("Warning: Could not parse raw disks from RawDisks, defaulting to empty", true)
         }
 
-        // 構建 config.json
+        // Build config.json
         config := cfg.Config{
             Debug:      false,
             CPU:        true,
@@ -124,22 +144,22 @@ func main() {
             Size:       "10M",
             Offset:     "1G",
             Block:      "4K",
-            Mode:       "both",
+            Mode:       "sequential", // Default to sequential to avoid 'both'
         }
 
-        // 檢查 MEMPercent
+        // Check MEMPercent
         if config.Memory && config.MEMPercent <= 0 {
             utils.LogMessage("Error: MEMPercent must be between 0.1 and 9.9 when Memory is enabled", true)
             os.Exit(1)
         }
 
-        // 檢查 Offset
+        // Check Offset
         if config.RAWDisk != "" && config.Offset == "" {
             utils.LogMessage("Error: Offset must be specified when RAWDisk is not empty", true)
             os.Exit(1)
         }
 
-        // 寫入 config.json
+        // Write config.json
         configData, err := json.MarshalIndent(config, "", "    ")
         if err != nil {
             utils.LogMessage(fmt.Sprintf("Error: Failed to marshal config: %v", err), true)
@@ -155,13 +175,13 @@ func main() {
         return
     }
 
-    // 加載 config.json
+    // Load config.json
     configuration, err := cfg.LoadConfig()
     if err != nil {
         fmt.Printf("[Ignore] Failed to load config.json, using default settings: %v\n", err)
     }
 
-    // 優先級：命令列 > config.json
+    // Prioritize command-line flags over config.json
     debug := debugFlag || configuration.Debug
     if !testCPU {
         testCPU = configuration.CPU
@@ -196,7 +216,7 @@ func main() {
         testMode = configuration.Mode
     }
 
-    // 檢查參數相依性
+    // Validate parameters
     if memoryPercent != 0 {
         if memoryPercent < 0.1 || memoryPercent > 9.9 {
             utils.LogMessage(fmt.Sprintf("Error: -memory must be between 0.1 and 9.9, got %.1f", memoryPercent), true)
@@ -212,7 +232,13 @@ func main() {
         os.Exit(1)
     }
 
-    // 設置最終預設值
+    // Validate test mode for raw disk tests
+    if len(rawDiskPaths) > 0 && testMode == "both" {
+        fmt.Println("Error: Raw disk tests (-disk) do not support 'both' mode. Please specify 'sequential' or 'random'.")
+        os.Exit(1)
+    }
+
+    // Set final default values
     if fileSize == "" {
         fileSize = "10MB"
     }
@@ -220,13 +246,13 @@ func main() {
         blockSizes = "4K"
     }
     if testMode == "" {
-        testMode = "both"
+        testMode = "sequential" // Default to sequential to avoid 'both'
     }
     if cpuLoad == "" {
         cpuLoad = "Default"
     }
 
-    // 解析統一的參數
+    // Parse unified parameters
     var fileSizeBytes, rawDiskStartOffsetBytes int64
     if fileSize != "" {
         size, err := utils.ParseSize(fileSize)
@@ -236,7 +262,7 @@ func main() {
         }
         fileSizeBytes = size
     } else {
-        fileSizeBytes = 10 * 1024 * 1024 // 預設 10MB
+        fileSizeBytes = 10 * 1024 * 1024 // Default 10MB
     }
 
     if rawDiskStartOffset != "" {
@@ -247,26 +273,14 @@ func main() {
         }
         rawDiskStartOffsetBytes = offset
     } else {
-        rawDiskStartOffsetBytes = 1024 * 1024 * 1024 // 預設 1GB
+        rawDiskStartOffsetBytes = 1024 * 1024 * 1024 // Default 1GB
     }
 
-    if printSystemInfo {
-        info := systeminfo.GetSystemInfo()
-        systeminfo.PrintSystemInfo(info)
-        return
-    }
-
-    if (!testCPU && memoryPercent == 0 && mountPoints == "" && len(rawDiskPaths) == 0) || showHelp {
-        fmt.Println("System Stress Test Tool")
-        fmt.Println("Usage: stress [options]")
-        fmt.Println("\nOptions:")
-        flag.PrintDefaults()
-        fmt.Println("\nNotes:")
-        fmt.Println("- At least one of -cpu, -memory, -l, -disk must be specified.")
-        fmt.Println("- Use -cpu-load to adjust CPU test intensity: 'High(2)', 'Low(1)', or 'Default(0)'.")
-        fmt.Println("- Use -print or -list to view available system resources.")
-        fmt.Println("- Use -scan to update config.json with system resources.")
-        return
+    // Check if any stress test is requested
+    if !testCPU && memoryPercent == 0 && mountPoints == "" && len(rawDiskPaths) == 0 {
+        fmt.Println("Error: At least one of -cpu, -memory, -l, or -disk must be specified for stress testing.")
+        fmt.Println("Use -h to see all options.")
+        os.Exit(1)
     }
 
     testDuration, err := time.ParseDuration(duration)
@@ -276,7 +290,7 @@ func main() {
     }
 
     utils.LogMessage(fmt.Sprintf("Starting stress test for %v...", testDuration), true)
-    utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), debug)
+    utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), true)
 
     perfStats := &cfg.PerformanceStats{
         CPU: cfg.CPUPerformance{
@@ -316,21 +330,19 @@ func main() {
         go memory.RunMemoryStressTest(&wg, stop, errorChan, memConfig, perfStats)
     }
 
-    // 解析測試模式
+    // Parse test modes
     var testModes []string
     switch testMode {
     case "sequential":
         testModes = []string{"sequential"}
     case "random":
         testModes = []string{"random"}
-    case "both", "":
-        testModes = []string{"sequential", "random"}
     default:
-        utils.LogMessage(fmt.Sprintf("Invalid test mode: %s, using both sequential and random", testMode), true)
-        testModes = []string{"sequential", "random"}
+        utils.LogMessage(fmt.Sprintf("Invalid test mode: %s, using sequential", testMode), true)
+        testModes = []string{"sequential"}
     }
 
-    // 解析塊大小
+    // Parse block sizes
     var blockSizeList []int64
     if blockSizes != "" {
         for _, bsStr := range strings.Split(blockSizes, ",") {
@@ -343,7 +355,7 @@ func main() {
         }
     }
     if len(blockSizeList) == 0 {
-        blockSizeList = append(blockSizeList, 4*1024) // 預設 4KB
+        blockSizeList = append(blockSizeList, 4*1024) // Default 4KB
     }
 
     // Mount point disk tests
@@ -469,11 +481,17 @@ func main() {
         go cpu.RunCPUStressTests(&wg, stop, errorChan, testConfig, perfStats)
     }
 
-    // 錯誤處理和進度更新（保持原樣）
+    // Error handling and progress updates
     go func() {
         for err := range errorChan {
             if err == "" {
                 continue
+            }
+
+            // Check for rawdisk 'both' mode error
+            if strings.Contains(err, "Test mode 'both' is not supported") {
+                fmt.Println(err)
+                os.Exit(1)
             }
 
             switch {
@@ -630,38 +648,6 @@ func main() {
 
     utils.LogMessage(resultStr, true)
     utils.LogMessage("Stress test completed!", true)
-}
-
-// 整合 printRawDiskPerformanceResults 函數
-func printRawDiskPerformanceResults(perfStats *cfg.PerformanceStats) {
-    if len(perfStats.RawDisk) == 0 {
-        return
-    }
-
-    utils.LogMessage("\nRaw Disk Performance Results:", true)
-    utils.LogMessage("-----------------------------", true)
-
-    deviceResults := make(map[string][]cfg.RawDiskPerformance)
-    for _, result := range perfStats.RawDisk {
-        deviceResults[result.DevicePath] = append(deviceResults[result.DevicePath], result)
-    }
-
-    for device, results := range deviceResults {
-        utils.LogMessage(fmt.Sprintf("\nDevice: %s", device), true)
-        utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s %-15s", "Mode", "Block Size", "Block Size", "Read Speed", "Write Speed", "Operations"), true)
-        utils.LogMessage(fmt.Sprintf("%-12s %-10s %-12s %-15s %-15s %-15s", "----", "----------", "----------", "----------", "-----------", "----------"), true)
-
-        for _, result := range results {
-            opsTotal := result.WriteCount + result.ReadCount
-            utils.LogMessage(fmt.Sprintf("%-12s %-10d %-12s %-15.2f %-15.2f %-15d",
-                result.Mode,
-                result.BlockSize,
-                utils.FormatSize(result.BlockSize),
-                result.ReadSpeed,
-                result.WriteSpeed,
-                opsTotal), true)
-        }
-    }
 }
 
 // randomSelectCores 從給定的核心列表中隨機選擇指定數量的核心

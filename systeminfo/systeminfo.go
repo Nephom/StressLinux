@@ -5,7 +5,7 @@ import (
         "os"
         "os/exec"
         "path/filepath"
-        "runtime" // 新增，用於獲取總 CPU 核心數
+        "runtime"
         "strconv"
         "strings"
         "syscall"
@@ -14,7 +14,7 @@ import (
         gdisk "github.com/shirou/gopsutil/v4/disk"
         gmem "github.com/shirou/gopsutil/v4/mem"
         gnet "github.com/shirou/gopsutil/v4/net"
-        "stress/utils" // 新增，導入 utils 包以獲取 NUMA 信息
+        "stress/utils"
 )
 
 // SystemInfo holds information about CPU, memory, disk, and raw disk availability.
@@ -23,7 +23,7 @@ type SystemInfo struct {
         MemoryInfo    string
         DiskMounts    string
         RawDisks      string
-        NUMAInfo      string // 新增字段，存儲格式化的 NUMA 信息
+        NUMAInfo      string
         DetailedInfo  DetailedSystemInfo
 }
 
@@ -44,7 +44,6 @@ func GetSystemInfo() SystemInfo {
         if err != nil || len(cpuInfo) == 0 {
                 info.CPUInfo = "CPU Info: Unable to retrieve CPU information"
         } else {
-                // Get total number of cores
                 totalCores, _ := gcpu.Counts(true)
                 info.CPUInfo = fmt.Sprintf("CPU Info: Model: %s, Cores: %d, Frequency: %.2f MHz",
                         cpuInfo[0].ModelName, totalCores, cpuInfo[0].Mhz)
@@ -94,8 +93,6 @@ func GetSystemInfo() SystemInfo {
                                 }
                         }
                 }
-        } else {
-                info.DiskMounts = "ZFS Info: Unable to retrieve zpool status"
         }
 
         for _, p := range partitions {
@@ -144,6 +141,7 @@ func GetSystemInfo() SystemInfo {
         for _, p := range partitions {
                 if strings.HasPrefix(p.Mountpoint, "/boot") ||
                         strings.HasPrefix(p.Mountpoint, "/var") ||
+                        strings.HasPrefix(p.Mountpoint, "/run") || // Exclude /run
                         p.Mountpoint == "/" ||
                         strings.HasPrefix(p.Mountpoint, "/snap") ||
                         strings.HasPrefix(p.Mountpoint, "/dev") ||
@@ -162,7 +160,7 @@ func GetSystemInfo() SystemInfo {
                 info.DiskMounts = fmt.Sprintf("Disk Mount Points Available for Stress: %s",
                         strings.Join(nonSystemMounts, ", "))
         } else {
-                info.DiskMounts = "Disk Mount Points: None available, please check df by yourself!"
+                info.DiskMounts = ""
         }
 
         // Raw disk detection
@@ -175,24 +173,35 @@ func GetSystemInfo() SystemInfo {
                 if _, err := os.Stat(diskPath); err != nil {
                         continue
                 }
+                // Skip disks used in ZFS, LVM, or MD RAID
                 if zfsDisks[diskPath] || lvmDisks[diskPath] || mdDisks[diskPath] {
                         continue
                 }
-                isSystemDisk := false
-                for _, p := range partitions {
-                        if strings.HasPrefix(p.Device, diskPath) && p.Mountpoint == "/" {
-                                isSystemDisk = true
-                                break
+                // Check for partitions
+                hasPartitions := false
+                if strings.HasPrefix(diskPath, "/dev/sd") {
+                        partitionPattern := diskPath + "[0-9]*"
+                        partitions, _ := filepath.Glob(partitionPattern)
+                        if len(partitions) > 0 {
+                                hasPartitions = true
+                        }
+                } else if strings.HasPrefix(diskPath, "/dev/nvme") {
+                        partitionPattern := diskPath + "p[0-9]*"
+                        partitions, _ := filepath.Glob(partitionPattern)
+                        if len(partitions) > 0 {
+                                hasPartitions = true
                         }
                 }
-                if !isSystemDisk {
-                        if stat, err := os.Stat(diskPath); err == nil {
-                                if stat.Mode()&os.ModeDevice != 0 {
-                                        var sysStat syscall.Stat_t
-                                        if err := syscall.Stat(diskPath, &sysStat); err == nil {
-                                                if sysStat.Rdev&0x7 == 0 {
-                                                        rawDisks = append(rawDisks, diskPath)
-                                                }
+                if hasPartitions {
+                        continue
+                }
+                // Check if disk is a block device
+                if stat, err := os.Stat(diskPath); err == nil {
+                        if stat.Mode()&os.ModeDevice != 0 {
+                                var sysStat syscall.Stat_t
+                                if err := syscall.Stat(diskPath, &sysStat); err == nil {
+                                        if sysStat.Rdev&0x7 == 0 {
+                                                rawDisks = append(rawDisks, diskPath)
                                         }
                                 }
                         }
@@ -203,7 +212,7 @@ func GetSystemInfo() SystemInfo {
                 info.RawDisks = fmt.Sprintf("Raw Disks Available for Stress: %s",
                         strings.Join(rawDisks, ", "))
         } else {
-                info.RawDisks = "Raw Disks: None available"
+                info.RawDisks = ""
         }
 
         // NUMA information
@@ -235,9 +244,7 @@ func getDetailedSystemInfo() DetailedSystemInfo {
         // Detailed CPU information
         cpuInfo, err := gcpu.Info()
         if err == nil && len(cpuInfo) > 0 {
-                // Get total number of cores
                 totalCores, _ := gcpu.Counts(true)
-                
                 details.CPUDetails = fmt.Sprintf(
                         "[CPU]: Model: %s, Cores: %d, Frequency: %.2f MHz, Cache: %d KB",
                         cpuInfo[0].ModelName, totalCores, cpuInfo[0].Mhz, cpuInfo[0].CacheSize)
@@ -280,7 +287,6 @@ func getDetailedSystemInfo() DetailedSystemInfo {
                                 }
                         }
                 }
-                // Append the last device if valid
                 if currentDevice != nil && currentDevice["Size"] != "No Module Installed" {
                         devices = append(devices, currentDevice)
                 }
@@ -344,28 +350,23 @@ func getDetailedSystemInfo() DetailedSystemInfo {
         possibleDisks := append(sdDisks, nvmeDisks...)
 
         for _, diskPath := range possibleDisks {
-                // Get disk model and size using lsblk
                 cmd := exec.Command("lsblk", "-d", "-n", "-o", "MODEL,SIZE", diskPath)
-                output, err := cmd.CombinedOutput() // Capture both stdout and stderr
+                output, err := cmd.CombinedOutput()
                 if err != nil {
-                        // Log error for debugging
                         fmt.Fprintf(os.Stderr, "lsblk failed for %s: %v, output: %s\n", diskPath, err, string(output))
                         continue
                 }
 
-                // Parse lsblk output
                 lines := strings.Split(strings.TrimSpace(string(output)), "\n")
                 if len(lines) == 0 {
                         continue
                 }
 
-                // Split MODEL and SIZE
                 fields := strings.Fields(lines[0])
                 if len(fields) < 1 {
                         continue
                 }
 
-                // Model may be empty, handle it gracefully
                 model := "Unknown Model"
                 if len(fields) > 1 {
                         model = strings.TrimSpace(strings.Join(fields[:len(fields)-1], " "))
@@ -374,7 +375,6 @@ func getDetailedSystemInfo() DetailedSystemInfo {
                         }
                 }
 
-                // Parse size (e.g., "447.1G" or "1T")
                 sizeStr := strings.TrimSpace(fields[len(fields)-1])
                 var sizeGB float64
                 if strings.HasSuffix(sizeStr, "T") {
@@ -396,7 +396,7 @@ func getDetailedSystemInfo() DetailedSystemInfo {
                         }
                         sizeGB = size / 1000
                 } else {
-                        continue // Skip if size format is unknown
+                        continue
                 }
 
                 diskDetails = append(diskDetails, fmt.Sprintf(
