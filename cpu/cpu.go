@@ -68,11 +68,31 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         utils.LogMessage("L3 Cache: Not present", testConfig.Debug)
     }
 
+    // Initialize all performance maps individually to prevent nil map panic
     perfStats.Lock()
     if perfStats.CPU.CoreGFLOPS == nil {
         perfStats.CPU.CoreGFLOPS = make(map[int]float64)
     }
+    if perfStats.CPU.IntegerGFLOPS == nil {
+        perfStats.CPU.IntegerGFLOPS = make(map[int]float64)
+    }
+    if perfStats.CPU.FloatGFLOPS == nil {
+        perfStats.CPU.FloatGFLOPS = make(map[int]float64)
+    }
+    if perfStats.CPU.VectorGFLOPS == nil {
+        perfStats.CPU.VectorGFLOPS = make(map[int]float64)
+    }
+    if perfStats.CPU.CacheGFLOPS == nil {
+        perfStats.CPU.CacheGFLOPS = make(map[int]float64)
+    }
+    if perfStats.CPU.BranchGFLOPS == nil {
+        perfStats.CPU.BranchGFLOPS = make(map[int]float64)
+    }
+    if perfStats.CPU.CryptoGFLOPS == nil {
+        perfStats.CPU.CryptoGFLOPS = make(map[int]float64)
+    }
     perfStats.CPU.CacheInfo = cacheInfo
+    utils.LogMessage("Initialized all perfStats.CPU maps", testConfig.Debug)
     perfStats.Unlock()
 
     // Determine the list of CPU cores to use
@@ -109,6 +129,15 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         }(cpuID)
     }
     innerWg.Wait()
+
+    // Aggregate total GFLOPS across all cores
+    perfStats.Lock()
+    totalGFLOPS := 0.0
+    for _, cpuID := range allCPUs {
+        totalGFLOPS += perfStats.CPU.CoreGFLOPS[cpuID]
+    }
+    perfStats.CPU.GFLOPS = totalGFLOPS
+    perfStats.Unlock()
 }
 
 // runAllTestsPerCore runs all test types sequentially in one goroutine per core
@@ -137,7 +166,7 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         }
     }
 
-    // 定義所有可用的測試項目及其參考權重
+    // Define all available tests and their reference weights
     allTests := map[string]struct {
         fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
         weight float64
@@ -150,7 +179,7 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         "crypto":  {runCryptoStressParallel, 0.15},
     }
 
-    // 定義每個 loadLevel 的測試項目和權重
+    // Define test configurations for each load level
     type testConfig struct {
         name   string
         weight float64
@@ -178,14 +207,13 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         },
     }
 
-    // 選擇測試項目
+    // Select tests based on load level
     var selectedTests []struct {
         name   string
         fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
         weight float64
     }
 
-    // 根據 loadLevel 選擇配置
     configKey := strings.ToLower(loadLevel)
     switch configKey {
     case "high", "2":
@@ -199,20 +227,17 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         configKey = "default"
     }
 
-    // 從配置中構建 selectedTests
     tests, exists := loadLevelConfigs[configKey]
     if !exists {
         utils.LogMessage(fmt.Sprintf("No config for load level %s, using Default", configKey), true)
         tests = loadLevelConfigs["default"]
     }
 
-    // 計算權重總和
     totalWeight := 0.0
     for _, test := range tests {
         totalWeight += test.weight
     }
 
-    // 僅對 high 正規化權重
     normalize := configKey == "high" && totalWeight != 0 && totalWeight != 1.0
 
     for _, test := range tests {
@@ -223,7 +248,7 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         }
         weight := test.weight
         if normalize {
-            weight = test.weight / totalWeight // 僅 high 正規化
+            weight = test.weight / totalWeight
         }
         selectedTests = append(selectedTests, struct {
             name   string
@@ -238,12 +263,11 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
         return
     }
 
-    // 記錄選定的測試、權重和預計循環時間
     cycleDuration := 50 * time.Millisecond
     if debug {
         usedTime := time.Duration(float64(cycleDuration) * totalWeight)
         if normalize {
-            usedTime = cycleDuration // high 正規化後用滿
+            usedTime = cycleDuration
         }
         utils.LogMessage(fmt.Sprintf("CPU %d: Load level %s, running %d tests: %v, expected cycle time: %v", cpuID, configKey, len(selectedTests), getTestNames(selectedTests), usedTime), debug)
     }
@@ -262,7 +286,6 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
                 testBudget := time.Duration(float64(cycleDuration) * test.weight)
                 test.fn(stop, errorChan, cpuID, perfStats, debug, loadLevel, testBudget)
             }
-            // 為 low 和 default 添加閒置時間
             if configKey != "high" && totalWeight < 1.0 {
                 idleTime := time.Duration(float64(cycleDuration) * (1.0 - totalWeight))
                 time.Sleep(idleTime)
@@ -274,7 +297,7 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
     }
 }
 
-// 輔助函數：取得測試名稱和權重
+// getTestNames returns test names and weights
 func getTestNames(tests []struct {
     name   string
     fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
@@ -330,9 +353,18 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
         gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.IntegerGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("IntegerGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.IntegerGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
         perfStats.CPU.IntegerOPS = (perfStats.CPU.IntegerOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.IntegerGFLOPS[cpuID] = (perfStats.CPU.IntegerGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
         perfStats.CPU.IntegerCount += operationCount
         perfStats.Unlock()
 
@@ -386,9 +418,18 @@ func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, 
         gflops := (opsPerSecond * flopsPerOp) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.FloatGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("FloatGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.FloatGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
         perfStats.CPU.FloatOPS = (perfStats.CPU.FloatOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.FloatGFLOPS[cpuID] = (perfStats.CPU.FloatGFLOPS[cpuID] + gflops) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflops) / 2
         perfStats.CPU.FloatCount += operationCount
         perfStats.Unlock()
 
@@ -453,9 +494,18 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
         gflops := (opsPerSecond * flopsPerVectorOp) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.VectorGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("VectorGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.VectorGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
         perfStats.CPU.VectorOPS = (perfStats.CPU.VectorOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.VectorGFLOPS[cpuID] = (perfStats.CPU.VectorGFLOPS[cpuID] + gflops) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflops) / 2
         perfStats.CPU.VectorCount += operationCount
         perfStats.Unlock()
 
@@ -465,7 +515,7 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
     }
 }
 
-// runCacheStressParallel performs cache stress testing targeting a specific cache level
+// runCacheStressParallel performs cache stress testing
 func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
@@ -578,8 +628,18 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
         gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.CacheGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CacheGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CacheGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
+        perfStats.CPU.CacheOPS = (perfStats.CPU.CacheOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.CacheGFLOPS[cpuID] = (perfStats.CPU.CacheGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
         perfStats.CPU.CacheCount += operationCount
         perfStats.Unlock()
 
@@ -629,8 +689,18 @@ func runBranchPredictionParallel(stop <-chan struct{}, errorChan chan<- string, 
         gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.BranchGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("BranchGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.BranchGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
+        perfStats.CPU.BranchOPS = (perfStats.CPU.BranchOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.BranchGFLOPS[cpuID] = (perfStats.CPU.BranchGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
         perfStats.CPU.BranchCount += operationCount
         perfStats.Unlock()
 
@@ -747,8 +817,18 @@ func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuI
         gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
 
         perfStats.Lock()
+        // Defensive check for nil map
+        if perfStats.CPU.CryptoGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CryptoGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CryptoGFLOPS = make(map[int]float64)
+        }
+        if perfStats.CPU.CoreGFLOPS == nil {
+            utils.LogMessage(fmt.Sprintf("CoreGFLOPS map is nil on CPU %d, initializing", cpuID), true)
+            perfStats.CPU.CoreGFLOPS = make(map[int]float64)
+        }
+        perfStats.CPU.CryptoOPS = (perfStats.CPU.CryptoOPS + opsPerSecond/1e9) / 2
+        perfStats.CPU.CryptoGFLOPS[cpuID] = (perfStats.CPU.CryptoGFLOPS[cpuID] + gflopsEquivalent) / 2
         perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.GFLOPS = (perfStats.CPU.GFLOPS + gflopsEquivalent) / 2
         perfStats.CPU.CryptoCount += operationCount
         perfStats.Unlock()
 

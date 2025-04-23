@@ -296,75 +296,76 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
 
     for {
         select {
-		case <-performanceUpdateTicker.C:
-		    now := time.Now()
-			duration := now.Sub(lastPerformanceUpdate)
+	case <-performanceUpdateTicker.C:
+	    now := time.Now()
+	    duration := now.Sub(lastPerformanceUpdate)
 
-			if operationCount > 1000 {
-			    bytesProcessed := int64(operationCount * 16)
-				currentSpeedMBps := float64(bytesProcessed) / duration.Seconds() / (1024 * 1024)
+	    if operationCount > 10000 {
+		bytesProcessed := int64(operationCount * 16)
+		currentSpeedMBps := float64(bytesProcessed) / duration.Seconds() / (1024 * 1024)
 
-                const smallTestSize = 1_000_000
-				testArray := make([]int64, smallTestSize)
+		const smallTestSize = 1_000_000
+		testArray := make([]int64, smallTestSize)
 
-				writeStart := time.Now()
-				for i := 0; i < smallTestSize; i++ {
-				    testArray[i] = int64(i)
-				}
-				writeDuration := time.Since(writeStart)
-				bytesWritten := smallTestSize * 8
-				writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
+		writeStart := time.Now()
+		for i := 0; i < smallTestSize; i++ {
+		    testArray[i] = int64(i)
+		}
 
-				readStart := time.Now()
-				var sum int64
-				for i := 0; i < smallTestSize; i++ {
-				    sum += testArray[i]
-				}
-				readDuration := time.Since(readStart)
-				bytesRead := smallTestSize * 8
-				readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
+		writeDuration := time.Since(writeStart)
+		bytesWritten := smallTestSize * 8
+		writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
 
-				perfStats.Lock()
-				perfStats.Memory.RandomAccessSpeed = currentSpeedMBps
-				if currentSpeedMBps < perfStats.Memory.MinRandomAccessSpeed || perfStats.Memory.MinRandomAccessSpeed == 0 {
-				    perfStats.Memory.MinRandomAccessSpeed = currentSpeedMBps
-				}
-				if currentSpeedMBps > perfStats.Memory.MaxRandomAccessSpeed {
-				    perfStats.Memory.MaxRandomAccessSpeed = currentSpeedMBps
-				}
-				perfStats.Memory.SumRandomAccessSpeed += currentSpeedMBps
-				perfStats.Memory.RandomAccessCount++
+		readStart := time.Now()
+		var sum int64
+		for i := 0; i < smallTestSize; i++ {
+		    sum += testArray[i]
+		}
+		readDuration := time.Since(readStart)
+		bytesRead := smallTestSize * 8
+		readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
 
-				perfStats.Memory.ReadSpeed = readSpeedMBps
-				if readSpeedMBps < perfStats.Memory.MinReadSpeed || perfStats.Memory.MinReadSpeed == 0 {
-				    perfStats.Memory.MinReadSpeed = readSpeedMBps
-				}
-				if readSpeedMBps > perfStats.Memory.MaxReadSpeed {
-				    perfStats.Memory.MaxReadSpeed = readSpeedMBps
-				}
-				perfStats.Memory.SumReadSpeed += readSpeedMBps
-				perfStats.Memory.ReadSpeedCount++
+		perfStats.Lock()
+		perfStats.Memory.RandomAccessSpeed = currentSpeedMBps
+		if currentSpeedMBps < perfStats.Memory.MinRandomAccessSpeed || perfStats.Memory.MinRandomAccessSpeed == 0 {
+		    perfStats.Memory.MinRandomAccessSpeed = currentSpeedMBps
+		}
+		if currentSpeedMBps > perfStats.Memory.MaxRandomAccessSpeed {
+		    perfStats.Memory.MaxRandomAccessSpeed = currentSpeedMBps
+	        }
+		perfStats.Memory.SumRandomAccessSpeed += currentSpeedMBps
+		perfStats.Memory.RandomAccessCount++
 
-				perfStats.Memory.WriteSpeed = writeSpeedMBps
-				if writeSpeedMBps < perfStats.Memory.MinWriteSpeed || perfStats.Memory.MinWriteSpeed == 0 {
-				    perfStats.Memory.MinWriteSpeed = writeSpeedMBps
-				}
-				if writeSpeedMBps > perfStats.Memory.MaxWriteSpeed {
-				    perfStats.Memory.MaxWriteSpeed = writeSpeedMBps
-				}
-				perfStats.Memory.SumWriteSpeed += writeSpeedMBps
-				perfStats.Memory.WriteSpeedCount++
+		perfStats.Memory.ReadSpeed = readSpeedMBps
+		if readSpeedMBps < perfStats.Memory.MinReadSpeed || perfStats.Memory.MinReadSpeed == 0 {
+		    perfStats.Memory.MinReadSpeed = readSpeedMBps
+	        }
+		if readSpeedMBps > perfStats.Memory.MaxReadSpeed {
+		    perfStats.Memory.MaxReadSpeed = readSpeedMBps
+	        }
+		perfStats.Memory.SumReadSpeed += readSpeedMBps
+		perfStats.Memory.ReadSpeedCount++
 
-				perfStats.Unlock()
-				if config.Debug {
-				    utils.LogMessage(fmt.Sprintf("Updated memory speeds: R=%.2f MB/s (Min=%.2f, Max=%.2f), W=%.2f MB/s (Min=%.2f, Max=%.2f), Rand=%.2f MB/s (Min=%.2f, Max=%.2f)",
-					readSpeedMBps, perfStats.Memory.MinReadSpeed, perfStats.Memory.MaxReadSpeed,
-					writeSpeedMBps, perfStats.Memory.MinWriteSpeed, perfStats.Memory.MaxWriteSpeed,
-					currentSpeedMBps, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed), config.Debug)
-				}
-			}
-			operationCount = 0
-			lastPerformanceUpdate = now
+		perfStats.Memory.WriteSpeed = writeSpeedMBps
+		if writeSpeedMBps < perfStats.Memory.MinWriteSpeed || perfStats.Memory.MinWriteSpeed == 0 {
+		    perfStats.Memory.MinWriteSpeed = writeSpeedMBps
+		}
+		if writeSpeedMBps > perfStats.Memory.MaxWriteSpeed {
+		    perfStats.Memory.MaxWriteSpeed = writeSpeedMBps
+	        }
+		perfStats.Memory.SumWriteSpeed += writeSpeedMBps
+		perfStats.Memory.WriteSpeedCount++
+
+		perfStats.Unlock()
+		if config.Debug {
+		    utils.LogMessage(fmt.Sprintf("Updated memory speeds: R=%.2f MB/s (Min=%.2f, Max=%.2f), W=%.2f MB/s (Min=%.2f, Max=%.2f), Rand=%.2f MB/s (Min=%.2f, Max=%.2f)",
+			readSpeedMBps, perfStats.Memory.MinReadSpeed, perfStats.Memory.MaxReadSpeed,
+			writeSpeedMBps, perfStats.Memory.MinWriteSpeed, perfStats.Memory.MaxWriteSpeed,
+			currentSpeedMBps, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed), config.Debug)
+		}
+	}
+	operationCount = 0
+	lastPerformanceUpdate = now
 
         case <-validationTicker.C:
             // Perform full memory validation

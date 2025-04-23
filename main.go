@@ -503,13 +503,27 @@ func main() {
 		}
 	}()
 
-	progressTicker := time.NewTicker(30 * time.Second)
+	progressTicker := time.NewTicker(120 * time.Second)
 	go func() {
 		for {
 			select {
 			case <-progressTicker.C:
 				perfStats.Lock()
 				cpuGFLOPS := perfStats.CPU.GFLOPS
+				integerGFLOPS := 0.0
+				floatGFLOPS := 0.0
+				vectorGFLOPS := 0.0
+				cacheGFLOPS := 0.0
+				branchGFLOPS := 0.0
+				cryptoGFLOPS := 0.0
+				for cpuID := 0; cpuID < perfStats.CPU.NumCores; cpuID++ {
+				    integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
+				    floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
+				    vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
+				    cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
+				    branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
+				    cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
+			        }
 				memRead := perfStats.Memory.ReadSpeed
 				memWrite := perfStats.Memory.WriteSpeed
 				memRand := perfStats.Memory.RandomAccessSpeed
@@ -539,7 +553,8 @@ func main() {
 
 				var progressMsg string
 				if testCPU {
-					progressMsg = fmt.Sprintf("Progress update - CPU: %.2f GFLOPS (approximate value, not exact)", cpuGFLOPS)
+				    progressMsg = fmt.Sprintf("Progress update - CPU: %.2f GFLOPS (Int: %.2f, Float: %.2f, Vec: %.2f, Cache: %.2f, Branch: %.2f, Crypto: %.2f)",
+				        cpuGFLOPS, integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS)
 				} else {
 					progressMsg = "Progress update"
 				}
@@ -575,13 +590,31 @@ func main() {
 	utils.LogMessage("=== PERFORMANCE RESULTS ===", true)
 	var totalOperations uint64
 	if testCPU {
-		cpuTotal := perfStats.CPU.IntegerCount + perfStats.CPU.FloatCount + perfStats.CPU.VectorCount +
-			perfStats.CPU.CacheCount + perfStats.CPU.BranchCount + perfStats.CPU.CryptoCount
-		utils.LogMessage(fmt.Sprintf("CPU Performance: %.2f GFLOPS (Load Level: %s)", perfStats.CPU.GFLOPS, cpuLoad), true)
-		utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
-			perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
-			perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
-		totalOperations += cpuTotal
+	    perfStats.Lock()
+	    cpuTotal := perfStats.CPU.IntegerCount + perfStats.CPU.FloatCount + perfStats.CPU.VectorCount +
+	        perfStats.CPU.CacheCount + perfStats.CPU.BranchCount + perfStats.CPU.CryptoCount
+	    integerGFLOPS := 0.0
+	    floatGFLOPS := 0.0
+	    vectorGFLOPS := 0.0
+	    cacheGFLOPS := 0.0
+	    branchGFLOPS := 0.0
+	    cryptoGFLOPS := 0.0
+	    for cpuID := 0; cpuID < perfStats.CPU.NumCores; cpuID++ {
+                integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
+                floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
+                vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
+                cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
+                branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
+                cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
+	    }
+	    perfStats.Unlock()
+
+	    utils.LogMessage(fmt.Sprintf("CPU Performance: %.2f GFLOPS (Load Level: %s)", perfStats.CPU.GFLOPS, cpuLoad), true)
+	    utils.LogMessage(fmt.Sprintf("Per-Test GFLOPS: Integer=%.2f, Float=%.2f, Vector=%.2f, Cache=%.2f, Branch=%.2f, Crypto=%.2f",
+                integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS), true)
+	    utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
+                perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
+                perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
 	}
 	if memoryPercent > 0 {
 	    memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
