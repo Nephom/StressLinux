@@ -512,6 +512,7 @@ func main() {
 				cpuGFLOPS := perfStats.CPU.GFLOPS
 				memRead := perfStats.Memory.ReadSpeed
 				memWrite := perfStats.Memory.WriteSpeed
+				memRand := perfStats.Memory.RandomAccessSpeed
 				var bestDiskRead, bestDiskWrite float64
 				var bestDiskMount string
 				for _, disk := range perfStats.Disk {
@@ -544,7 +545,7 @@ func main() {
 				}
 
 				if memoryPercent > 0 {
-					progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s", memRead, memWrite)
+					progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s Rand=%.2f MB/s", memRead, memWrite, memRand)
 				}
 				if len(mounts) > 0 {
 					progressMsg += fmt.Sprintf(", Disk(%s): R=%.2f MB/s W=%.2f MB/s",
@@ -583,11 +584,26 @@ func main() {
 		totalOperations += cpuTotal
 	}
 	if memoryPercent > 0 {
-		memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
-		utils.LogMessage(fmt.Sprintf("Memory Performance - Read: %.2f MB/s, Write: %.2f MB/s, Random Access: %.2f MB/s",
-			perfStats.Memory.ReadSpeed, perfStats.Memory.WriteSpeed, perfStats.Memory.RandomAccessSpeed), true)
+	    memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
+		perfStats.Lock()
+
+        var avgReadSpeed, avgWriteSpeed, avgRandomAccessSpeed float64
+		if perfStats.Memory.ReadSpeedCount > 0 {
+            avgReadSpeed = perfStats.Memory.SumReadSpeed / float64(perfStats.Memory.ReadSpeedCount)
+		}
+		if perfStats.Memory.WriteSpeedCount > 0 {
+            avgWriteSpeed = perfStats.Memory.SumWriteSpeed / float64(perfStats.Memory.WriteSpeedCount)
+		}
+		if perfStats.Memory.RandomAccessCount > 0 {
+		    avgRandomAccessSpeed = perfStats.Memory.SumRandomAccessSpeed / float64(perfStats.Memory.RandomAccessCount)
+		}
+		utils.LogMessage(fmt.Sprintf("Memory Performance - Read: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f), Write: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f), Random Access: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f)",
+		    perfStats.Memory.ReadSpeed, perfStats.Memory.MinReadSpeed, perfStats.Memory.MaxReadSpeed, avgReadSpeed,
+            perfStats.Memory.WriteSpeed, perfStats.Memory.MinWriteSpeed, perfStats.Memory.MaxWriteSpeed, avgWriteSpeed,
+			perfStats.Memory.RandomAccessSpeed, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed, avgRandomAccessSpeed), true)
 		utils.LogMessage(fmt.Sprintf("Memory Operations: Write=%d, Read=%d, Random Access=%d, Total=%d",
-			perfStats.Memory.WriteCount, perfStats.Memory.ReadCount, perfStats.Memory.RandomAccessCount, memTotal), true)
+            perfStats.Memory.WriteCount, perfStats.Memory.ReadCount, perfStats.Memory.RandomAccessCount, memTotal), true)
+		perfStats.Unlock()
 		totalOperations += memTotal
 	}
 	if len(mounts) > 0 {

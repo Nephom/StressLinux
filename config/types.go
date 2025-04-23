@@ -71,24 +71,37 @@ type CacheInfo struct {
 
 // MemoryPerformance tracks memory performance metrics
 type MemoryPerformance struct {
-    ReadSpeed        float64 // in MB/s
-    WriteSpeed       float64 // in MB/s
-    RandomAccessSpeed float64 // in MB/s
-    UsagePercent     float64 // Percentage of memory used
-    WriteCount       uint64  // Write operation count
-    ReadCount        uint64  // Read operation count
-    RandomAccessCount uint64  // Random access operation count
+    ReadSpeed            float64
+    WriteSpeed           float64
+    RandomAccessSpeed    float64
+    MinReadSpeed         float64 // 新增：最小讀取速度
+    MaxReadSpeed         float64 // 新增：最大讀取速度
+    MinWriteSpeed        float64 // 新增：最小寫入速度
+    MaxWriteSpeed        float64 // 新增：最大寫入速度
+    MinRandomAccessSpeed float64 // 已有：最小隨機存取速度
+    MaxRandomAccessSpeed float64 // 已有：最大隨機存取速度
+    SumReadSpeed         float64 // 新增：用於計算平均讀取速度
+    SumWriteSpeed        float64 // 新增：用於計算平均寫入速度
+    SumRandomAccessSpeed float64 // 新增：用於計算平均隨機存取速度
+    ReadSpeedCount       int     // 新增：讀取速度更新次數
+    WriteSpeedCount      int     // 新增：寫入速度更新次數
+    RandomAccessCount    uint64
+    ReadCount            uint64
+    WriteCount           uint64
+    UsagePercent         float64
 }
 
 // DiskPerformance tracks disk performance metrics
 type DiskPerformance struct {
     ReadSpeed  float64 // in MB/s
     WriteSpeed float64 // in MB/s
+	RandomAccessSpeed float64
     MountPoint string
     Mode       string
     BlockSize  int64
     WriteCount uint64  // Write operation count
     ReadCount  uint64  // Read operation count
+	RandomAccessCount uint64
 }
 
 // RawDiskPerformance tracks raw disk performance metrics
