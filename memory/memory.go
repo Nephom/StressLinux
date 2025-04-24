@@ -20,7 +20,7 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
 
     if config.Debug {
         utils.LogMessage(fmt.Sprintf("Memory test targeting %.2f%% of total system memory (%.2f GB)",
-            config.UsagePercent*100, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
+            config.UsagePercent*200, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
     }
 
     // Sequential memory test with validation

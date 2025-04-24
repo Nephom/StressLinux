@@ -5,18 +5,19 @@ import "sync"
 
 // Config structure
 type Config struct {
-    Debug      bool    `json:"debug"`
-    CPU        bool    `json:"CPU"`
-    Cores      int     `json:"Cores"`
-    Load       string  `json:"Load"`
-    Memory     bool    `json:"Memory"`
-    MEMPercent float64 `json:"MEMPercent"`
-    Mountpoint string  `json:"Mountpoint"`
-    RAWDisk    string  `json:"RAWDisk"`
-    Size       string  `json:"Size"`
-    Offset     string  `json:"Offset"`
-    Block      string  `json:"Block"`
-    Mode       string  `json:"Mode"`
+    Debug      bool    `json:"debug" description:"Enable debug mode"`
+    CPU        bool    `json:"CPU" description:"Enable CPU stress testing"`
+    Cores      int     `json:"Cores" description:"Number of CPU cores to stress (0 means all cores)"`
+    Load       string  `json:"Load" description:"CPU load level: High(2), Low(1), or Default(0)"`
+    Memory     bool    `json:"Memory" description:"Enable memory stress testing"`
+    MEMPercent float64 `json:"MEMPercent" description:"Memory testing percentage (0.1-9.9 for 1%-99% of total memory, e.g., 1.5 for 15%)"`
+    Mountpoint string  `json:"Mountpoint" description:"Comma-separated mount points to test (e.g., /mnt/disk1,/mnt/disk2)"`
+    RAWDisk    string  `json:"RAWDisk" description:"Raw disk devices to test (e.g., /dev/sdb, /dev/nvme0n1)"`
+    Size       string  `json:"Size" description:"Size of test files for disk tests or test size for raw disk tests (supports K, M, G units)"`
+    Offset     string  `json:"Offset" description:"Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units)"`
+    Block      string  `json:"Block" description:"Comma-separated block sizes for disk and raw disk operations (supports K, M, G units)"`
+    Mode       string  `json:"Mode" description:"Test mode for mountpoint(sequential/random/both) and raw disk(Only sequential or random)"`
+	NUMANode   int     `json:"NUMANode" description: Test NUMA node, default is -1 means test all nodes."`
 }
 
 // TestResult structure
@@ -104,13 +105,13 @@ type MemoryPerformance struct {
 type DiskPerformance struct {
     ReadSpeed  float64 // in MB/s
     WriteSpeed float64 // in MB/s
-	RandomAccessSpeed float64
+    RandomAccessSpeed float64
     MountPoint string
     Mode       string
     BlockSize  int64
     WriteCount uint64  // Write operation count
     ReadCount  uint64  // Read operation count
-	RandomAccessCount uint64
+    RandomAccessCount uint64
 }
 
 // RawDiskPerformance tracks raw disk performance metrics
