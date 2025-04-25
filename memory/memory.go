@@ -9,63 +9,83 @@ import (
     "sync"
     "syscall"
     "time"
+	"unsafe"
 )
 
 // RunMemoryStressTest runs the memory stress test
-func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, config MemoryConfig, perfStats *config.PerformanceStats) {
+func LogMemoryAddress(arrIdx, elemIdx int, arrays [][]int64) string {
+    baseAddr := uintptr(unsafe.Pointer(&arrays[arrIdx][0]))
+    offset := uintptr(elemIdx) * 8
+    return fmt.Sprintf("0x%x", baseAddr+offset)
+}
+
+func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, config MemoryConfig, perfStats_ *config.PerformanceStats) {
     defer wg.Done()
+
+    // 執行緒專屬隨機數生成器
+    threadRNG := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+    // 保護 checkpointData 的鎖
+    var checkpointDataLock sync.Mutex
+    checkpointData := make(map[int]map[int]int64)
+
+    // 錯誤記錄和損壞位置追蹤
+    type ErrorRecord struct {
+        Timestamp   time.Time
+        ArrIdx      int
+        ElemIdx     int
+        Actual      int64
+        Expected    int64
+        Address     string
+        RepairTried bool
+    }
+    var errorRecords []ErrorRecord
+    var errorRecordsLock sync.Mutex
+    var damagedLocations map[string]int // 記錄損壞次數
+    var damagedLocationsLock sync.Mutex
+    damagedLocations = make(map[string]int)
 
     totalMem, _ := getSystemMemory()
     targetMemBytes := uint64(float64(totalMem) * config.UsagePercent)
-
     if config.Debug {
         utils.LogMessage(fmt.Sprintf("Memory test targeting %.2f%% of total system memory (%.2f GB)",
-            config.UsagePercent*200, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
+            config.UsagePercent*100, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
     }
 
-    // Sequential memory test with validation
+    // Sequential memory test
     const speedTestSize = 50_000_000
-    var speedTestArray []int64
-    speedTestArray = make([]int64, speedTestSize)
+    speedTestArray := make([]int64, speedTestSize)
 
-    // Write test with data pattern
     if config.Debug {
-        utils.LogMessage("Measuring sequential memory write speed with validation pattern...", config.Debug)
+        utils.LogMessage("Measuring sequential memory write speed...", config.Debug)
     }
-
     writeStart := time.Now()
     writeCount := uint64(0)
     validationErrors := 0
-    
     for i := 0; i < speedTestSize; i++ {
-        speedTestArray[i] = int64(i * 2) // Using a simple pattern (i*2) for validation
+        speedTestArray[i] = int64(i * 2)
         writeCount++
     }
     writeDuration := time.Since(writeStart)
     bytesWritten := speedTestSize * 8
     writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
 
-    // Read test with validation
     if config.Debug {
-        utils.LogMessage("Measuring sequential memory read speed with data validation...", config.Debug)
+        utils.LogMessage("Measuring sequential memory read speed...", config.Debug)
     }
-
     var sum int64 = 0
     readCount := uint64(0)
     readStart := time.Now()
     for i := 0; i < speedTestSize; i++ {
         val := speedTestArray[i]
         expectedVal := int64(i * 2)
-        
-        // Validate read data matches expected pattern
         if val != expectedVal {
             validationErrors++
-            if validationErrors < 10 && config.Debug { // Limit error messages
-                utils.LogMessage(fmt.Sprintf("Data validation error at index %d: got %d, expected %d", 
+            if validationErrors < 10 && config.Debug {
+                utils.LogMessage(fmt.Sprintf("Data validation error at index %d: got %d, expected %d",
                     i, val, expectedVal), config.Debug)
             }
         }
-        
         sum += val
         readCount++
     }
@@ -74,75 +94,65 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
 
     if validationErrors > 0 && config.Debug {
-        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during sequential read test!", 
+        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during sequential read test!",
             validationErrors), config.Debug)
-        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in sequential read test", 
+        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in sequential read test",
             validationErrors)
     } else if config.Debug {
-        utils.LogMessage("Sequential data validation: PASSED (all values matched expected pattern)", config.Debug)
+        utils.LogMessage("Sequential data validation: PASSED", config.Debug)
     }
 
-    // Random memory access test with validation
+    // Random memory access test
     if config.Debug {
-        utils.LogMessage("Measuring random memory access speed with data validation...", config.Debug)
+        utils.LogMessage("Measuring random memory access speed...", config.Debug)
     }
-
     randIndices := make([]int, 5_000_000)
     for i := range randIndices {
-        randIndices[i] = rand.Intn(speedTestSize)
+        randIndices[i] = threadRNG.Intn(speedTestSize)
     }
 
-    // Track modifications for validation
     modifications := make(map[int]int64)
     randomValidationErrors := 0
     randomCount := uint64(0)
     randomStart := time.Now()
-    
     for _, idx := range randIndices {
         originalVal := speedTestArray[idx]
         expectedVal := int64(0)
-        
-        // If we've modified this index before, check it matches our expected value
         if modifiedVal, exists := modifications[idx]; exists {
             expectedVal = modifiedVal
             if originalVal != expectedVal {
                 randomValidationErrors++
                 if randomValidationErrors < 10 && config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Random access validation error at index %d: got %d, expected %d", 
+                    utils.LogMessage(fmt.Sprintf("Random access validation error at index %d: got %d, expected %d",
                         idx, originalVal, expectedVal), config.Debug)
                 }
             }
         } else {
-            // First access to this index, should be our initial pattern
             expectedVal = int64(idx * 2)
             if originalVal != expectedVal {
                 randomValidationErrors++
                 if randomValidationErrors < 10 && config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Initial pattern validation error at index %d: got %d, expected %d", 
+                    utils.LogMessage(fmt.Sprintf("Initial pattern validation error at index %d: got %d, expected %d",
                         idx, originalVal, expectedVal), config.Debug)
                 }
             }
         }
-        
-        // Modify the value with XOR (reversible operation)
         newVal := originalVal ^ 0x1
         speedTestArray[idx] = newVal
-        // Store the expected value after modification
         modifications[idx] = newVal
         randomCount++
     }
-    
     randomDuration := time.Since(randomStart)
     randomBytes := int64(len(randIndices) * 16)
     randomSpeedMBps := float64(randomBytes) / randomDuration.Seconds() / (1024 * 1024)
 
     if randomValidationErrors > 0 && config.Debug {
-        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during random access test!", 
+        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during random access test!",
             randomValidationErrors), config.Debug)
-        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in random access test", 
+        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in random access test",
             randomValidationErrors)
     } else if config.Debug {
-        utils.LogMessage("Random access data validation: PASSED (all values matched expected pattern)", config.Debug)
+        utils.LogMessage("Random access data validation: PASSED", config.Debug)
     }
 
     if config.Debug {
@@ -152,63 +162,59 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         utils.LogMessage(fmt.Sprintf("  - Random access:    %.2f MB/s, operations: %d", randomSpeedMBps, randomCount), config.Debug)
     }
 
-    // Clean up for memory allocation test
+    // Clean up
     speedTestArray = nil
     modifications = nil
     runtime.GC()
 
-    // Long-running memory stress test setup
+    // Long-running memory stress test
     const arraySize = 10_000_000
     const bytesPerEntry = 8
     arraysNeeded := int(targetMemBytes / (arraySize * bytesPerEntry))
     if arraysNeeded < 1 {
         arraysNeeded = 1
     }
-
     if config.Debug {
         utils.LogMessage(fmt.Sprintf("Memory test allocating %d arrays of %d elements each", arraysNeeded, arraySize), config.Debug)
     }
 
     var arrays [][]int64
-    // Store a validation pattern for periodic integrity checks
-    var validationPatterns [][]int64
     allocStart := time.Now()
     var bytesAllocated uint64 = 0
+    seed := time.Now().UnixNano()
+    arraySeedValues := make([]int64, 0, arraysNeeded)
+    const checkpointInterval = 100_000
 
     for i := 0; i < arraysNeeded; i++ {
         var arr []int64
-        var pattern []int64
-        
         func() {
             defer func() {
                 if r := recover(); r != nil && config.Debug {
                     utils.LogMessage(fmt.Sprintf("Recovered from allocation panic: %v", r), config.Debug)
                 }
             }()
-
             arr = make([]int64, arraySize)
-            pattern = make([]int64, arraySize)
-            
-            // Initialize with a validation pattern - every 10th value is its index
+            arraySeed := seed + int64(i*1000)
+            arraySeedValues = append(arraySeedValues, arraySeed)
+            arrayRNG := rand.New(rand.NewSource(arraySeed))
+
             for j := range arr {
-                // Store a deterministic but semi-random pattern
-                value := rand.Int63()
-                arr[j] = value
-                pattern[j] = value
-                
-                // Special validation values every 10th element
-                if j%10 == 0 {
-                    arr[j] = int64(j)
-                    pattern[j] = int64(j)
+                if j%checkpointInterval == 0 {
+                    arr[j] = int64(j) ^ arraySeed
+                    checkpointDataLock.Lock()
+                    if checkpointData[i] == nil {
+                        checkpointData[i] = make(map[int]int64)
+                    }
+                    checkpointData[i][j] = arr[j]
+                    checkpointDataLock.Unlock()
+                } else {
+                    arr[j] = arrayRNG.Int63()
                 }
             }
         }()
-
         if arr != nil {
             arrays = append(arrays, arr)
-            validationPatterns = append(validationPatterns, pattern)
             bytesAllocated += arraySize * bytesPerEntry
-
             if config.Debug && (i+1)%10 == 0 {
                 allocPercent := float64(bytesAllocated) * 100 / float64(totalMem)
                 utils.LogMessage(fmt.Sprintf("Memory allocation progress: %d/%d arrays (%.2f%% of system memory)",
@@ -220,14 +226,12 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
             }
             break
         }
-
         if bytesAllocated >= targetMemBytes {
             if config.Debug {
                 utils.LogMessage("Reached target memory allocation", config.Debug)
             }
             break
         }
-
         if i%100 == 0 {
             runtime.GC()
         }
@@ -245,242 +249,232 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         utils.LogMessage(fmt.Sprintf("Memory bulk allocation speed: %.2f MB/s", allocSpeedMBps), config.Debug)
     }
 
-    perfStats.Lock()
-    perfStats.Memory.WriteSpeed = writeSpeedMBps
-    perfStats.Memory.ReadSpeed = readSpeedMBps
-    perfStats.Memory.RandomAccessSpeed = randomSpeedMBps
-    perfStats.Memory.UsagePercent = memoryUsagePercent
-    perfStats.Memory.WriteCount = writeCount
-    perfStats.Memory.ReadCount = readCount
-    perfStats.Memory.RandomAccessCount = randomCount
-	perfStats.Memory.MinReadSpeed = readSpeedMBps
-	perfStats.Memory.MaxReadSpeed = readSpeedMBps
-	perfStats.Memory.SumReadSpeed = readSpeedMBps
-	perfStats.Memory.ReadSpeedCount = 1
-
-    perfStats.Memory.MinWriteSpeed = writeSpeedMBps
-	perfStats.Memory.MaxWriteSpeed = writeSpeedMBps
-	perfStats.Memory.SumWriteSpeed = writeSpeedMBps
-	perfStats.Memory.WriteSpeedCount = 1
-
-	perfStats.Memory.MinRandomAccessSpeed = randomSpeedMBps
-	perfStats.Memory.MaxRandomAccessSpeed = randomSpeedMBps
-	perfStats.Memory.SumRandomAccessSpeed = randomSpeedMBps
-	perfStats.Memory.RandomAccessCount = randomCount
-    perfStats.Unlock()
+    perfStats_.Lock()
+    perfStats_.Memory.WriteSpeed = writeSpeedMBps
+    perfStats_.Memory.ReadSpeed = readSpeedMBps
+    perfStats_.Memory.RandomAccessSpeed = randomSpeedMBps
+    perfStats_.Memory.UsagePercent = memoryUsagePercent
+    perfStats_.Memory.WriteCount = writeCount
+    perfStats_.Memory.ReadCount = readCount
+    perfStats_.Memory.RandomAccessCount = randomCount
+    perfStats_.Memory.MinReadSpeed = readSpeedMBps
+    perfStats_.Memory.MaxReadSpeed = readSpeedMBps
+    perfStats_.Memory.SumReadSpeed = readSpeedMBps
+    perfStats_.Memory.ReadSpeedCount = 1
+    perfStats_.Memory.MinWriteSpeed = writeSpeedMBps
+    perfStats_.Memory.MaxWriteSpeed = writeSpeedMBps
+    perfStats_.Memory.SumWriteSpeed = writeSpeedMBps
+    perfStats_.Memory.WriteSpeedCount = 1
+    perfStats_.Memory.MinRandomAccessSpeed = randomSpeedMBps
+    perfStats_.Memory.MaxRandomAccessSpeed = randomSpeedMBps
+    perfStats_.Memory.SumRandomAccessSpeed = randomSpeedMBps
+    perfStats_.Memory.RandomAccessCount = 1
+    perfStats_.Unlock()
 
     if memoryUsagePercent < config.UsagePercent*75.0 {
         errorChan <- fmt.Sprintf("Could only allocate %.2f%% of system memory, wanted %.2f%%",
             memoryUsagePercent, config.UsagePercent*100)
     }
 
-    // Add periodic full validation
     validationTicker := time.NewTicker(30 * time.Second)
     defer validationTicker.Stop()
-    
-    // Track modifications for each array in the ongoing test
+    performanceUpdateTicker := time.NewTicker(10 * time.Second)
+    defer performanceUpdateTicker.Stop()
+
     memValidationErrors := uint64(0)
     operationsSinceLastValidation := uint64(0)
-    
-    // Track memory operations
-    modificationsMade := make(map[int]map[int]int64)
-    for i := range arrays {
-        modificationsMade[i] = make(map[int]int64)
-    }
-
-    performanceUpdateTicker := time.NewTicker(10 * time.Second)
-	defer performanceUpdateTicker.Stop()
-
     operationCount := uint64(0)
-	lastPerformanceUpdate := time.Now()
+    lastPerformanceUpdate := time.Now()
 
     for {
         select {
-	case <-performanceUpdateTicker.C:
-	    now := time.Now()
-	    duration := now.Sub(lastPerformanceUpdate)
-
-	    if operationCount > 10000 {
-		bytesProcessed := int64(operationCount * 16)
-		currentSpeedMBps := float64(bytesProcessed) / duration.Seconds() / (1024 * 1024)
-
-		const smallTestSize = 1_000_000
-		testArray := make([]int64, smallTestSize)
-
-		writeStart := time.Now()
-		for i := 0; i < smallTestSize; i++ {
-		    testArray[i] = int64(i)
-		}
-
-		writeDuration := time.Since(writeStart)
-		bytesWritten := smallTestSize * 8
-		writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
-
-		readStart := time.Now()
-		var sum int64
-		for i := 0; i < smallTestSize; i++ {
-		    sum += testArray[i]
-		}
-		readDuration := time.Since(readStart)
-		bytesRead := smallTestSize * 8
-		readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
-
-		perfStats.Lock()
-		perfStats.Memory.RandomAccessSpeed = currentSpeedMBps
-		if currentSpeedMBps < perfStats.Memory.MinRandomAccessSpeed || perfStats.Memory.MinRandomAccessSpeed == 0 {
-		    perfStats.Memory.MinRandomAccessSpeed = currentSpeedMBps
-		}
-		if currentSpeedMBps > perfStats.Memory.MaxRandomAccessSpeed {
-		    perfStats.Memory.MaxRandomAccessSpeed = currentSpeedMBps
-	        }
-		perfStats.Memory.SumRandomAccessSpeed += currentSpeedMBps
-		perfStats.Memory.RandomAccessCount++
-
-		perfStats.Memory.ReadSpeed = readSpeedMBps
-		if readSpeedMBps < perfStats.Memory.MinReadSpeed || perfStats.Memory.MinReadSpeed == 0 {
-		    perfStats.Memory.MinReadSpeed = readSpeedMBps
-	        }
-		if readSpeedMBps > perfStats.Memory.MaxReadSpeed {
-		    perfStats.Memory.MaxReadSpeed = readSpeedMBps
-	        }
-		perfStats.Memory.SumReadSpeed += readSpeedMBps
-		perfStats.Memory.ReadSpeedCount++
-
-		perfStats.Memory.WriteSpeed = writeSpeedMBps
-		if writeSpeedMBps < perfStats.Memory.MinWriteSpeed || perfStats.Memory.MinWriteSpeed == 0 {
-		    perfStats.Memory.MinWriteSpeed = writeSpeedMBps
-		}
-		if writeSpeedMBps > perfStats.Memory.MaxWriteSpeed {
-		    perfStats.Memory.MaxWriteSpeed = writeSpeedMBps
-	        }
-		perfStats.Memory.SumWriteSpeed += writeSpeedMBps
-		perfStats.Memory.WriteSpeedCount++
-
-		perfStats.Unlock()
-		if config.Debug {
-		    utils.LogMessage(fmt.Sprintf("Updated memory speeds: R=%.2f MB/s (Min=%.2f, Max=%.2f), W=%.2f MB/s (Min=%.2f, Max=%.2f), Rand=%.2f MB/s (Min=%.2f, Max=%.2f)",
-			readSpeedMBps, perfStats.Memory.MinReadSpeed, perfStats.Memory.MaxReadSpeed,
-			writeSpeedMBps, perfStats.Memory.MinWriteSpeed, perfStats.Memory.MaxWriteSpeed,
-			currentSpeedMBps, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed), config.Debug)
-		}
-	}
-	operationCount = 0
-	lastPerformanceUpdate = now
+        case <-performanceUpdateTicker.C:
+            now := time.Now()
+            duration := now.Sub(lastPerformanceUpdate)
+            if operationCount > 10000 {
+                bytesProcessed := int64(operationCount * 16)
+                currentSpeedMBps := float64(bytesProcessed) / duration.Seconds() / (1024 * 1024)
+                const smallTestSize = 1_000_000
+                testArray := make([]int64, smallTestSize)
+                writeStart := time.Now()
+                for i := 0; i < smallTestSize; i++ {
+                    testArray[i] = int64(i)
+                }
+                writeDuration := time.Since(writeStart)
+                bytesWritten := smallTestSize * 8
+                writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
+                readStart := time.Now()
+                var sum int64
+                for i := 0; i < smallTestSize; i++ {
+                    sum += testArray[i]
+                }
+                readDuration := time.Since(readStart)
+                bytesRead := smallTestSize * 8
+                readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
+                perfStats_.Lock()
+                perfStats_.Memory.RandomAccessSpeed = currentSpeedMBps
+                if currentSpeedMBps < perfStats_.Memory.MinRandomAccessSpeed || perfStats_.Memory.MinRandomAccessSpeed == 0 {
+                    perfStats_.Memory.MinRandomAccessSpeed = currentSpeedMBps
+                }
+                if currentSpeedMBps > perfStats_.Memory.MaxRandomAccessSpeed {
+                    perfStats_.Memory.MaxRandomAccessSpeed = currentSpeedMBps
+                }
+                perfStats_.Memory.SumRandomAccessSpeed += currentSpeedMBps
+                perfStats_.Memory.RandomAccessCount++
+                perfStats_.Memory.ReadSpeed = readSpeedMBps
+                if readSpeedMBps < perfStats_.Memory.MinReadSpeed || perfStats_.Memory.MinReadSpeed == 0 {
+                    perfStats_.Memory.MinReadSpeed = readSpeedMBps
+                }
+                if readSpeedMBps > perfStats_.Memory.MaxReadSpeed {
+                    perfStats_.Memory.MaxReadSpeed = readSpeedMBps
+                }
+                perfStats_.Memory.SumReadSpeed += readSpeedMBps
+                perfStats_.Memory.ReadSpeedCount++
+                perfStats_.Memory.WriteSpeed = writeSpeedMBps
+                if writeSpeedMBps < perfStats_.Memory.MinWriteSpeed || perfStats_.Memory.MinWriteSpeed == 0 {
+                    perfStats_.Memory.MinWriteSpeed = writeSpeedMBps
+                }
+                if writeSpeedMBps > perfStats_.Memory.MaxWriteSpeed {
+                    perfStats_.Memory.MaxWriteSpeed = writeSpeedMBps
+                }
+                perfStats_.Memory.SumWriteSpeed += writeSpeedMBps
+                perfStats_.Memory.WriteSpeedCount++
+                perfStats_.Unlock()
+                if config.Debug {
+                    utils.LogMessage(fmt.Sprintf("Performance update: Random Access Speed %.2f MB/s, Read Speed %.2f MB/s, Write Speed %.2f MB/s",
+                        currentSpeedMBps, readSpeedMBps, writeSpeedMBps), config.Debug)
+                }
+            }
+            operationCount = 0
+            lastPerformanceUpdate = now
 
         case <-validationTicker.C:
-            // Perform full memory validation
-            if config.Debug {
-                utils.LogMessage(fmt.Sprintf("Running full memory validation after %d operations...", 
-                    operationsSinceLastValidation), config.Debug)
-            }
-            
             validationStart := time.Now()
             localErrors := uint64(0)
-            
-            // Check all arrays
+
             for arrIdx := range arrays {
-                if arrIdx >= len(validationPatterns) {
+                if arrIdx >= len(arraySeedValues) {
                     continue
                 }
-                
-                // Sample every 100th element to reduce validation overhead
-                for elemIdx := 0; elemIdx < len(arrays[arrIdx]); elemIdx += 100 {
-                    expectedVal := validationPatterns[arrIdx][elemIdx]
-                    
-                    // If we modified this value, get the expected modified value
-                    if modVal, exists := modificationsMade[arrIdx][elemIdx]; exists {
-                        expectedVal = modVal
-                    }
-                    
+                checkpointDataLock.Lock()
+                for elemIdx, expectedVal := range checkpointData[arrIdx] {
                     actualVal := arrays[arrIdx][elemIdx]
+                    address := LogMemoryAddress(arrIdx, elemIdx, arrays)
+                    damagedLocationsLock.Lock()
+                    if damagedLocations[address] >= 3 { // 連續3次錯誤則跳過
+                        damagedLocationsLock.Unlock()
+                        continue
+                    }
+                    damagedLocationsLock.Unlock()
+
                     if actualVal != expectedVal {
                         localErrors++
-                        if localErrors < 10 && config.Debug {
-                            utils.LogMessage(fmt.Sprintf("Memory validation error at arr[%d][%d]: got %d, expected %d", 
-                                arrIdx, elemIdx, actualVal, expectedVal), config.Debug)
+                        damagedLocationsLock.Lock()
+                        damagedLocations[address]++
+                        damagedLocationsLock.Unlock()
+
+                        errorRecordsLock.Lock()
+                        errorRecords = append(errorRecords, ErrorRecord{
+                            Timestamp: time.Now(),
+                            ArrIdx:    arrIdx,
+                            ElemIdx:   elemIdx,
+                            Actual:    actualVal,
+                            Expected:  expectedVal,
+                            Address:   address,
+                            RepairTried: false,
+                        })
+                        errorRecordsLock.Unlock()
+
+                        // 嘗試修復
+                        arrays[arrIdx][elemIdx] = expectedVal
+                        if config.Debug {
+                            utils.LogMessage(fmt.Sprintf("Checkpoint validation error at arr[%d][%d]: got %d, expected %d, address: %s, repair attempted",
+                                arrIdx, elemIdx, actualVal, expectedVal, address), config.Debug)
+                        }
+
+                        // 再次驗證
+                        if arrays[arrIdx][elemIdx] != expectedVal {
+                            if config.Debug {
+                                utils.LogMessage(fmt.Sprintf("Repair failed at arr[%d][%d], address: %s",
+                                    arrIdx, elemIdx, address), config.Debug)
+                            }
                         }
                     }
                 }
-                
-                // Every 10th array, validate special values (indices divisible by 10)
-                if arrIdx%10 == 0 {
-                    for elemIdx := 0; elemIdx < len(arrays[arrIdx]); elemIdx += 10 {
-                        if elemIdx%10 == 0 {
-                            expectedVal := int64(elemIdx) // Special pattern: value equals index
-                            // If we modified this value, get the expected modified value
-                            if modVal, exists := modificationsMade[arrIdx][elemIdx]; exists {
-                                expectedVal = modVal
-                            }
-                            
-                            actualVal := arrays[arrIdx][elemIdx]
-                            if actualVal != expectedVal {
-                                localErrors++
-                                if localErrors < 10 && config.Debug {
-                                    utils.LogMessage(fmt.Sprintf("Special value validation error at arr[%d][%d]: got %d, expected %d", 
-                                        arrIdx, elemIdx, actualVal, expectedVal), config.Debug)
-                                }
-                            }
-                        }
-                    }
-                }
+                checkpointDataLock.Unlock()
             }
-            
+
             memValidationErrors += localErrors
             validationDuration := time.Since(validationStart)
-            
+
             if localErrors > 0 {
-                errorMsg := fmt.Sprintf("Memory validation found %d errors! Total errors so far: %d", 
-                    localErrors, memValidationErrors)
+                errorMsg := fmt.Sprintf("Memory validation found %d errors! Total errors so far: %d", localErrors, memValidationErrors)
                 if config.Debug {
                     utils.LogMessage(errorMsg, config.Debug)
                 }
                 errorChan <- errorMsg
             } else if config.Debug {
-                utils.LogMessage(fmt.Sprintf("Memory validation PASSED (checked %d arrays in %.2f seconds)", 
-                    len(arrays), validationDuration.Seconds()), config.Debug)
+                utils.LogMessage(fmt.Sprintf("Memory validation PASSED (checked %d arrays in %.2f seconds)", len(arrays), validationDuration.Seconds()), config.Debug)
             }
-            
+
             operationsSinceLastValidation = 0
-            
+
         case <-stop:
             if config.Debug {
                 utils.LogMessage("Memory test stopped.", config.Debug)
                 if memValidationErrors > 0 {
-                    utils.LogMessage(fmt.Sprintf("Total memory validation errors during test: %d", 
-                        memValidationErrors), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Total memory validation errors during test: %d", memValidationErrors), config.Debug)
+                    errorRecordsLock.Lock()
+                    utils.LogMessage(fmt.Sprintf("Error records: %+v", errorRecords), config.Debug)
+                    errorRecordsLock.Unlock()
+                    damagedLocationsLock.Lock()
+                    utils.LogMessage(fmt.Sprintf("Damaged locations (error count): %+v", damagedLocations), config.Debug)
+                    damagedLocationsLock.Unlock()
                 } else {
                     utils.LogMessage("Memory data validation: All checks PASSED", config.Debug)
                 }
             }
             return
-            
+
         default:
-            for i := 0; i < 1000; i++ {
+            for i := 0; i < 1000 && operationsSinceLastValidation < 5000; i++ {
                 if len(arrays) == 0 {
                     break
                 }
+                arrIdx := threadRNG.Intn(len(arrays))
+                elemIdx := threadRNG.Intn(arraySize)
+                address := LogMemoryAddress(arrIdx, elemIdx, arrays)
+                damagedLocationsLock.Lock()
+                if damagedLocations[address] >= 3 {
+                    damagedLocationsLock.Unlock()
+                    continue
+                }
+                damagedLocationsLock.Unlock()
 
-                arrIdx := rand.Intn(len(arrays))
-                elemIdx := rand.Intn(arraySize)
                 val := arrays[arrIdx][elemIdx]
                 newVal := val ^ 0xFF
                 arrays[arrIdx][elemIdx] = newVal
-                
-                // Track this modification for validation
-                modificationsMade[arrIdx][elemIdx] = newVal
-                
-                perfStats.Lock()
-                perfStats.Memory.RandomAccessCount++
-                perfStats.Unlock()
-				operationCount++
-                
+
+                if elemIdx%checkpointInterval == 0 {
+                    checkpointDataLock.Lock()
+                    if checkpointData[arrIdx] == nil {
+                        checkpointData[arrIdx] = make(map[int]int64)
+                    }
+                    checkpointData[arrIdx][elemIdx] = newVal
+                    checkpointDataLock.Unlock()
+                }
+
+                perfStats_.Lock()
+                perfStats_.Memory.RandomAccessCount++
+                perfStats_.Unlock()
+
+                operationCount++
                 operationsSinceLastValidation++
             }
 
-            if rand.Intn(10_000) == 0 {
+            if threadRNG.Intn(10_000) == 0 {
                 runtime.GC()
             }
-
             time.Sleep(time.Millisecond)
         }
     }

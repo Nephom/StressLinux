@@ -370,10 +370,10 @@ func main() {
 
     // 記憶體測試
     if memoryPercent > 0 {
-        memUsagePercent := (memoryPercent / 10.0) * 0.4
-        if memUsagePercent > 0.5 {
-            memUsagePercent = 0.48
-            utils.LogMessage("Memory usage capped at 96% for system stability", true)
+        memUsagePercent := memoryPercent / 10.0
+        if memUsagePercent > 0.95 {
+            memUsagePercent = 0.95
+            utils.LogMessage("Memory usage capped at 95% for system stability", true)
         }
 
         memConfig := memory.MemoryConfig{
