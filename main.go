@@ -240,7 +240,7 @@ func main() {
             Memory:         config.Memory,
             MemoryDesc:     "Enable memory stress testing",
             MEMPercent:     config.MEMPercent,
-            MEMPercentDesc: "Memory testing percentage (0.1-4.9 for 1%-49% of total memory, e.g., 1.5 for 15%)",
+            MEMPercentDesc: "Memory testing percentage (0.1-9.0 for 1%-90% of total memory, e.g., 1.5 for 15%)",
             Mountpoint:     config.Mountpoint,
             MountpointDesc: "Comma-separated mount points to test (e.g., /mnt/disk1,/mnt/disk2)",
             RAWDisk:        config.RAWDisk,
@@ -371,9 +371,9 @@ func main() {
     // 記憶體測試
     if memoryPercent > 0 {
         memUsagePercent := memoryPercent / 10.0
-        if memUsagePercent > 0.95 {
-            memUsagePercent = 0.95
-            utils.LogMessage("Memory usage capped at 95% for system stability", true)
+        if memUsagePercent > 0.9 {
+            memUsagePercent = 0.9
+            utils.LogMessage("Memory recommand usage capped at 90% for system stability", true)
         }
 
         memConfig := memory.MemoryConfig{
