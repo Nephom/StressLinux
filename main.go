@@ -103,7 +103,6 @@ func main() {
             numaNode = configuration.NUMANode
         }
     } else {
-        // 如果有命令列參數，僅使用命令列參數
         debug = debugFlag
     }
 
@@ -272,9 +271,6 @@ func main() {
         return
     }
 
-    // 移除原有的 config.json 載入和優先級邏輯
-    // 如果有命令列參數，已經在 flag.Parse() 中設置，無需再次載入 config.json
-
     // 驗證參數
     if memoryPercent != 0 {
         if memoryPercent < 0.1 || memoryPercent > 9.9 {
@@ -347,9 +343,16 @@ func main() {
     utils.LogMessage(fmt.Sprintf("Starting stress test for %v...", testDuration), true)
     utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), true)
 
+    // 初始化 perfStats
     perfStats := &cfg.PerformanceStats{
         CPU: cfg.CPUPerformance{
-            CoreGFLOPS: make(map[int]float64),
+            CoreGFLOPS:      make(map[int]float64),
+            IntegerGFLOPS:   make(map[int]float64),
+            FloatGFLOPS:     make(map[int]float64),
+            VectorGFLOPS:    make(map[int]float64),
+            CacheGFLOPS:     make(map[int]float64),
+            BranchGFLOPS:    make(map[int]float64),
+            CryptoGFLOPS:    make(map[int]float64),
         },
         Memory:  cfg.MemoryPerformance{},
         Disk:    []cfg.DiskPerformance{},
@@ -373,7 +376,7 @@ func main() {
         memUsagePercent := memoryPercent / 10.0
         if memUsagePercent > 0.9 {
             memUsagePercent = 0.9
-            utils.LogMessage("Memory recommand usage capped at 90% for system stability", true)
+            utils.LogMessage("Memory recommended usage capped at 90% for system stability", true)
         }
 
         memConfig := memory.MemoryConfig{
@@ -549,7 +552,7 @@ func main() {
             }
 
             switch {
-            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") || strings.Contains(err, "Vector"):
+            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") || strings.Contains(err, "Vector") || strings.Contains(err, "Cache") || strings.Contains(err, "Crypto"):
                 results.CPU = "FAIL"
                 errorDetails["CPU"] = append(errorDetails["CPU"], err)
             case strings.Contains(err, "Memory"):
@@ -676,6 +679,7 @@ func main() {
         utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
             perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
             perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
+        totalOperations += cpuTotal
     }
     if memoryPercent > 0 {
         memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
@@ -751,24 +755,37 @@ func main() {
 
     utils.LogMessage(resultStr, true)
     utils.LogMessage("Stress test completed!", true)
+
+    // 清空 perfStats 以釋放記憶體
+    perfStats.Lock()
+    perfStats.CPU.CoreGFLOPS = nil
+    perfStats.CPU.IntegerGFLOPS = nil
+    perfStats.CPU.FloatGFLOPS = nil
+    perfStats.CPU.VectorGFLOPS = nil
+    perfStats.CPU.CacheGFLOPS = nil
+    perfStats.CPU.BranchGFLOPS = nil
+    perfStats.CPU.CryptoGFLOPS = nil
+    perfStats.Disk = nil
+    perfStats.RawDisk = nil
+    perfStats.Unlock()
 }
 
+// randomSelectCores 使用 Fisher-Yates 洗牌演算法隨機選擇指定數量的 CPU 核心
 func randomSelectCores(cpus []int, count int) []int {
     if count >= len(cpus) {
         return append([]int{}, cpus...)
     }
 
-    available := append([]int{}, cpus...)
-    selected := make([]int, 0, count)
+    // 複製輸入切片以避免修改原始資料
+    result := make([]int, len(cpus))
+    copy(result, cpus)
 
-    for i := 0; i < count; i++ {
-        if len(available) == 0 {
-            break
-        }
-        idx := rand.Intn(len(available))
-        selected = append(selected, available[idx])
-        available = append(available[:idx], available[idx+1:]...)
+    // Fisher-Yates 洗牌，只洗牌前 count 個元素
+    for i := 0; i < count && i < len(result); i++ {
+        j := i + rand.Intn(len(result)-i)
+        result[i], result[j] = result[j], result[i]
     }
 
-    return selected
+    // 返回前 count 個元素
+    return result[:count]
 }
