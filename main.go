@@ -284,11 +284,6 @@ func main() {
         os.Exit(1)
     }
 
-    if len(rawDiskPaths) > 0 && testMode == "both" {
-        fmt.Println("Error: Raw disk tests (-disk) do not support 'both' mode. Please specify 'sequential' or 'random'.")
-        os.Exit(1)
-    }
-
     // 設置最終預設值
     if fileSize == "" {
         fileSize = "10MB"
@@ -301,6 +296,24 @@ func main() {
     }
     if cpuLoad == "" {
         cpuLoad = "Default"
+    }
+
+	var testModes []string
+    if len(rawDiskPaths) > 0 && testMode == "both" {
+        utils.LogMessage("Invalid test mode: both, using sequential", true)
+        testModes = []string{"sequential"}
+    } else {
+        switch testMode {
+        case "sequential":
+            testModes = []string{"sequential"}
+        case "random":
+            testModes = []string{"random"}
+        case "both":
+            testModes = []string{"sequential", "random"}
+        default:
+            utils.LogMessage(fmt.Sprintf("Invalid test mode: %s, using sequential", testMode), true)
+            testModes = []string{"sequential"}
+        }
     }
 
     // 解析統一參數
@@ -388,18 +401,6 @@ func main() {
         go memory.RunMemoryStressTest(&wg, stop, errorChan, memConfig, perfStats)
     }
 
-    // 解析測試模式
-    var testModes []string
-    switch testMode {
-    case "sequential":
-        testModes = []string{"sequential"}
-    case "random":
-        testModes = []string{"random"}
-    default:
-        utils.LogMessage(fmt.Sprintf("Invalid test mode: %s, using sequential", testMode), true)
-        testModes = []string{"sequential"}
-    }
-
     // 解析區塊大小
     var blockSizeList []int64
     if blockSizes != "" {
@@ -436,7 +437,7 @@ func main() {
                 }
 
                 wg.Add(1)
-                go disk.RunDiskStressTest(&wg, stop, errorChan, diskConfig, perfStats, debug)
+                go disk.RunDiskStressTest(&wg, stop, errorChan, diskConfig, perfStats, debug, duration)
             }
         }
     }
@@ -467,7 +468,7 @@ func main() {
                     utils.FormatSize(rawDiskStartOffsetBytes)), debug)
 
                 wg.Add(1)
-                go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug)
+                go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug, duration)
             }
         }
     }
@@ -567,81 +568,80 @@ func main() {
         }
     }()
 
-    progressTicker := time.NewTicker(120 * time.Second)
-    go func() {
+	progressTicker := time.NewTicker(120 * time.Second)
+	go func() {
         for {
             select {
             case <-progressTicker.C:
                 perfStats.Lock()
-                cpuGFLOPS := perfStats.CPU.GFLOPS
                 integerGFLOPS := 0.0
-                floatGFLOPS := 0.0
-                vectorGFLOPS := 0.0
-                cacheGFLOPS := 0.0
-                branchGFLOPS := 0.0
-                cryptoGFLOPS := 0.0
+				floatGFLOPS := 0.0
+				vectorGFLOPS := 0.0
+				cacheGFLOPS := 0.0
+				branchGFLOPS := 0.0
+				cryptoGFLOPS := 0.0
                 for cpuID := 0; cpuID < perfStats.CPU.NumCores; cpuID++ {
-                    integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
-                    floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
-                    vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
-                    cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
-                    branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
-                    cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
-                }
-                memRead := perfStats.Memory.ReadSpeed
-                memWrite := perfStats.Memory.WriteSpeed
-                memRand := perfStats.Memory.RandomAccessSpeed
-                var bestDiskRead, bestDiskWrite float64
-                var bestDiskMount string
-                for _, disk := range perfStats.Disk {
+				    integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
+					floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
+					vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
+					cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
+					branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
+					cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
+				}
+				memRead := perfStats.Memory.ReadSpeed
+				memWrite := perfStats.Memory.WriteSpeed
+				memRand := perfStats.Memory.RandomAccessSpeed
+				var bestDiskRead, bestDiskWrite float64
+				var bestDiskMount string
+				for _, disk := range perfStats.Disk {
                     if disk.ReadSpeed > bestDiskRead {
                         bestDiskRead = disk.ReadSpeed
-                        bestDiskMount = disk.MountPoint
-                    }
-                    if disk.WriteSpeed > bestDiskWrite {
+						bestDiskMount = disk.MountPoint
+					}
+					if disk.WriteSpeed > bestDiskWrite {
                         bestDiskWrite = disk.WriteSpeed
-                    }
-                }
-                var bestRawDiskRead, bestRawDiskWrite float64
-                var bestRawDiskDevice string
-                for _, rawDisk := range perfStats.RawDisk {
+					}
+				}
+				var bestRawDiskRead, bestRawDiskWrite float64
+				var bestRawDiskDevice string
+				for _, rawDisk := range perfStats.RawDisk {
                     if rawDisk.ReadSpeed > bestRawDiskRead {
-                        bestRawDiskRead = rawDisk.ReadSpeed
-                        bestRawDiskDevice = rawDisk.DevicePath
-                    }
-                    if rawDisk.WriteSpeed > bestRawDiskWrite {
-                        bestRawDiskWrite = rawDisk.WriteSpeed
-                    }
-                }
-                perfStats.Unlock()
+					    bestRawDiskRead = rawDisk.ReadSpeed
+						bestRawDiskDevice = rawDisk.DevicePath
+					}
+					if rawDisk.WriteSpeed > bestRawDiskWrite {
+					    bestRawDiskWrite = rawDisk.WriteSpeed
+					}
+				}
+				perfStats.Unlock()
 
                 var progressMsg string
-                if testCPU {
-                    progressMsg = fmt.Sprintf("Progress update - CPU: %.2f GFLOPS (Int: %.2f, Float: %.2f, Vec: %.2f, Cache: %.2f, Branch: %.2f, Crypto: %.2f)",
-                        cpuGFLOPS, integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS)
-                } else {
-                    progressMsg = "Progress update"
-                }
+				if testCPU {
+                    progressMsg = fmt.Sprintf("Progress update - CPU (Int: %.2f, Float: %.2f, Vec: %.2f, Cache: %.2f, Branch: %.2f, Crypto: %.2f)",
+                        integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS)
+				} else {
+					progressMsg = "Progress update"
+				}
 
                 if memoryPercent > 0 {
                     progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s Rand=%.2f MB/s", memRead, memWrite, memRand)
-                }
-                if len(mounts) > 0 {
+				}
+				if len(mounts) > 0 {
                     progressMsg += fmt.Sprintf(", Disk(%s): R=%.2f MB/s W=%.2f MB/s",
                         bestDiskMount, bestDiskRead, bestDiskWrite)
-                }
-                if len(rawDiskPaths) > 0 {
-                    progressMsg += fmt.Sprintf(", RawDisk(%s): R=%.2f MB/s W=%.2f MB/s",
+				}
+				if len(rawDiskPaths) > 0 {
+				    progressMsg += fmt.Sprintf(", RawDisk(%s): R=%.2f MB/s W=%.2f MB/s",
                         bestRawDiskDevice, bestRawDiskRead, bestRawDiskWrite)
-                }
-                utils.LogMessage(progressMsg, true)
+				}
+				utils.LogMessage(progressMsg, true)
 
-            case <-stop:
-                progressTicker.Stop()
-                return
-            }
-        }
-    }()
+			case <-stop:
+			    progressTicker.Stop()
+				return
+			}
+		}
+	}()
 
     startTime := time.Now()
     time.Sleep(testDuration)

@@ -14,10 +14,11 @@ import (
     "time"
 )
 
-// RunDiskStressTest runs the disk stress test
-func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig DiskTestConfig, perfStats *config.PerformanceStats, debug bool) {
+// RunDiskStressTest runs the disk stress test with optimized memory usage and dynamic stats interval
+func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig DiskTestConfig, perfStats *config.PerformanceStats, debug bool, duration string) {
     defer wg.Done()
 
+    // Validate and set defaults
     if len(testConfig.MountPoints) == 0 {
         utils.LogMessage("No mount points specified, using current directory '.'", true)
         testConfig.MountPoints = []string{"."}
@@ -34,6 +35,24 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         utils.LogMessage(fmt.Sprintf("Warning: FileSize (%s) is smaller than BlockSize (%s) for random/both mode.",
             utils.FormatSize(testConfig.FileSize), utils.FormatSize(testConfig.BlockSize)), true)
     }
+
+    // Calculate stats interval based on duration
+    dur, err := time.ParseDuration(duration)
+    if err != nil {
+        errorMsg := fmt.Sprintf("Invalid duration format: %v", err)
+        errorChan <- errorMsg
+        utils.LogMessage(errorMsg, true)
+        return
+    }
+    durSeconds := int64(dur.Seconds())
+    var statsInterval int64
+    if durSeconds <= 60 {
+        statsInterval = 10 // 10 seconds for short durations
+    } else {
+        statsInterval = durSeconds / 60 // e.g., 3600s -> 60s, 86400s -> 1440s
+    }
+    ticker := time.NewTicker(time.Duration(statsInterval) * time.Second)
+    defer ticker.Stop()
 
     var testModes []string
     if testConfig.TestMode == "both" {
@@ -53,6 +72,7 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
         go func(mp string) {
             defer mountWg.Done()
 
+            // Validate mount point
             if info, err := os.Stat(mp); err != nil {
                 errorMsg := fmt.Sprintf("Mount point %s not accessible: %v", mp, err)
                 errorChan <- errorMsg
@@ -65,6 +85,7 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                 return
             }
 
+            // Check write permission
             tempFilePath := filepath.Join(mp, fmt.Sprintf(".writetest_%d", time.Now().UnixNano()))
             tempFile, err := os.Create(tempFilePath)
             if err != nil {
@@ -76,6 +97,7 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
             tempFile.Close()
             os.Remove(tempFilePath)
 
+            // Check disk space
             var stat syscall.Statfs_t
             requiredSpace := uint64(testConfig.FileSize) * 2
             if err := syscall.Statfs(mp, &stat); err == nil {
@@ -87,13 +109,18 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                     utils.LogMessage(errorMsg, true)
                     return
                 }
-                utils.LogMessage(fmt.Sprintf("Disk space check on %s: OK (Available: %s, Required: approx %s)", mp,
-                    utils.FormatSize(int64(availableBytes)), utils.FormatSize(int64(requiredSpace))), debug)
+                if debug {
+                    utils.LogMessage(fmt.Sprintf("Disk space check on %s: OK (Available: %s, Required: approx %s)", mp,
+                        utils.FormatSize(int64(availableBytes)), utils.FormatSize(int64(requiredSpace))), true)
+                }
             } else {
                 utils.LogMessage(fmt.Sprintf("Warning: Could not check disk space on %s: %v. Proceeding anyway.", mp, err), true)
             }
 
-            utils.LogMessage(fmt.Sprintf("Generating %s of random data for tests on %s...", utils.FormatSize(testConfig.FileSize), mp), debug)
+            // Generate random data once per mount point
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Generating %s of random data for tests on %s...", utils.FormatSize(testConfig.FileSize), mp), true)
+            }
             data := make([]byte, testConfig.FileSize)
             if _, err := rand.Read(data); err != nil {
                 errorMsg := fmt.Sprintf("Failed to generate random data for %s: %v", mp, err)
@@ -101,7 +128,9 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                 utils.LogMessage(errorMsg, true)
                 return
             }
-            utils.LogMessage(fmt.Sprintf("Random data generated for %s.", mp), debug)
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Random data generated for %s.", mp), true)
+            }
 
             modeWg := &sync.WaitGroup{}
             for _, mode := range testModes {
@@ -110,21 +139,30 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                     defer modeWg.Done()
                     filePath := filepath.Join(mp, fmt.Sprintf("stress_test_%s_%d.dat", currentMode, rand.Intn(10000)))
 
-                    utils.LogMessage(fmt.Sprintf("Starting disk test goroutine for mount point: %s (mode: %s, file: %s, size: %s, block: %s)",
-                        mp, currentMode, filepath.Base(filePath), utils.FormatSize(testConfig.FileSize), utils.FormatSize(testConfig.BlockSize)), debug)
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("Starting disk test for %s (mode: %s, file: %s, size: %s, block: %s)",
+                            mp, currentMode, filepath.Base(filePath), utils.FormatSize(testConfig.FileSize), utils.FormatSize(testConfig.BlockSize)), true)
+                    }
 
                     iteration := 0
                     for {
-                        iteration++
-                        utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Starting cycle.", mp, currentMode, iteration), debug)
-
                         select {
                         case <-stop:
                             os.Remove(filePath)
-                            utils.LogMessage(fmt.Sprintf("Disk test stopped on %s (mode: %s, file: %s)", mp, currentMode, filepath.Base(filePath)), debug)
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Disk test stopped on %s (mode: %s, file: %s)", mp, currentMode, filepath.Base(filePath)), true)
+                            }
                             return
                         default:
-                            utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Performing write...", mp, currentMode, iteration), debug)
+                            iteration++
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Starting cycle.", mp, currentMode, iteration), true)
+                            }
+
+                            // Perform disk write
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Performing write...", mp, currentMode, iteration), true)
+                            }
                             writeStart := time.Now()
                             writeErr := performDiskWrite(filePath, data, currentMode, testConfig.BlockSize)
                             writeDuration := time.Since(writeStart)
@@ -138,14 +176,10 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                                 continue
                             }
 
-                            writeSpeedMBps := float64(0)
-                            if writeDuration.Seconds() > 0 {
-                                writeSpeedMBps = float64(testConfig.FileSize) / writeDuration.Seconds() / (1024 * 1024)
+                            // Perform disk read and verify
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Performing read and verify...", mp, currentMode, iteration), true)
                             }
-                            utils.LogMessage(fmt.Sprintf("Disk write on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
-                                mp, currentMode, iteration, writeSpeedMBps, utils.FormatSize(testConfig.FileSize), writeDuration), debug)
-
-                            utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Performing read and verify...", mp, currentMode, iteration), debug)
                             readStart := time.Now()
                             readErr := performDiskReadAndVerify(filePath, data, currentMode, testConfig.BlockSize)
                             readDuration := time.Since(readStart)
@@ -159,66 +193,92 @@ func RunDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
                                 continue
                             }
 
-                            readSpeedMBps := float64(0)
-                            if readDuration.Seconds() > 0 {
-                                readSpeedMBps = float64(testConfig.FileSize) / readDuration.Seconds() / (1024 * 1024)
-                            }
-                            utils.LogMessage(fmt.Sprintf("Disk read/verify on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
-                                mp, currentMode, iteration, readSpeedMBps, utils.FormatSize(testConfig.FileSize), readDuration), debug)
-
-                            perfStats.Lock()
-                            diskPerfKey := fmt.Sprintf("%s|%s|%d", mp, currentMode, testConfig.BlockSize)
-                            found := false
-                            for i, dp := range perfStats.Disk {
-                                existingKey := fmt.Sprintf("%s|%s|%d", dp.MountPoint, dp.Mode, dp.BlockSize)
-                                if existingKey == diskPerfKey {
-                                    if readSpeedMBps > dp.ReadSpeed {
-                                        perfStats.Disk[i].ReadSpeed = readSpeedMBps
-                                        utils.LogMessage(fmt.Sprintf("Updated best read speed for %s: %.2f MB/s", diskPerfKey, readSpeedMBps), debug)
-                                    }
-                                    if writeSpeedMBps > dp.WriteSpeed {
-                                        perfStats.Disk[i].WriteSpeed = writeSpeedMBps
-                                        utils.LogMessage(fmt.Sprintf("Updated best write speed for %s: %.2f MB/s", diskPerfKey, writeSpeedMBps), debug)
-                                    }
-                                    perfStats.Disk[i].WriteCount++
-                                    perfStats.Disk[i].ReadCount++
-                                    found = true
-                                    break
+                            // Update stats only on ticker
+                            select {
+                            case <-ticker.C:
+                                writeSpeedMBps := float64(0)
+                                if writeDuration.Seconds() > 0 {
+                                    writeSpeedMBps = float64(testConfig.FileSize) / writeDuration.Seconds() / (1024 * 1024)
                                 }
-                            }
-
-                            if !found {
-                                newPerf := config.DiskPerformance{
-                                    MountPoint: mp,
-                                    Mode:       currentMode,
-                                    BlockSize:  testConfig.BlockSize,
-                                    ReadSpeed:  readSpeedMBps,
-                                    WriteSpeed: writeSpeedMBps,
-                                    WriteCount: 1,
-                                    ReadCount:  1,
+                                readSpeedMBps := float64(0)
+                                if readDuration.Seconds() > 0 {
+                                    readSpeedMBps = float64(testConfig.FileSize) / readDuration.Seconds() / (1024 * 1024)
                                 }
-                                perfStats.Disk = append(perfStats.Disk, newPerf)
-                                utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s, Operations: Write=1, Read=1", diskPerfKey, readSpeedMBps, writeSpeedMBps), debug)
-                            }
-                            perfStats.Unlock()
 
-                            utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Cycle completed successfully. Sleeping.", mp, currentMode, iteration), debug)
+                                if debug {
+                                    utils.LogMessage(fmt.Sprintf("Disk write on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
+                                        mp, currentMode, iteration, writeSpeedMBps, utils.FormatSize(testConfig.FileSize), writeDuration), true)
+                                    utils.LogMessage(fmt.Sprintf("Disk read/verify on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
+                                        mp, currentMode, iteration, readSpeedMBps, utils.FormatSize(testConfig.FileSize), readDuration), true)
+                                }
+
+                                // Update performance stats
+                                perfStats.Lock()
+                                diskPerfKey := fmt.Sprintf("%s|%s|%d", mp, currentMode, testConfig.BlockSize)
+                                found := false
+                                for i, dp := range perfStats.Disk {
+                                    existingKey := fmt.Sprintf("%s|%s|%d", dp.MountPoint, dp.Mode, dp.BlockSize)
+                                    if existingKey == diskPerfKey {
+                                        if readSpeedMBps > dp.ReadSpeed {
+                                            perfStats.Disk[i].ReadSpeed = readSpeedMBps
+                                            if debug {
+                                                utils.LogMessage(fmt.Sprintf("Updated best read speed for %s: %.2f MB/s", diskPerfKey, readSpeedMBps), true)
+                                            }
+                                        }
+                                        if writeSpeedMBps > dp.WriteSpeed {
+                                            perfStats.Disk[i].WriteSpeed = writeSpeedMBps
+                                            if debug {
+                                                utils.LogMessage(fmt.Sprintf("Updated best write speed for %s: %.2f MB/s", diskPerfKey, writeSpeedMBps), true)
+                                            }
+                                        }
+                                        perfStats.Disk[i].WriteCount++
+                                        perfStats.Disk[i].ReadCount++
+                                        found = true
+                                        break
+                                    }
+                                }
+                                if !found {
+                                    newPerf := config.DiskPerformance{
+                                        MountPoint: mp,
+                                        Mode:       currentMode,
+                                        BlockSize:  testConfig.BlockSize,
+                                        ReadSpeed:  readSpeedMBps,
+                                        WriteSpeed: writeSpeedMBps,
+                                        WriteCount: 1,
+                                        ReadCount:  1,
+                                    }
+                                    perfStats.Disk = append(perfStats.Disk, newPerf)
+                                    if debug {
+                                        utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s", diskPerfKey, readSpeedMBps, writeSpeedMBps), true)
+                                    }
+                                }
+                                perfStats.Unlock()
+                            default:
+                                // Continue without updating stats
+                            }
+
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Mount %s, Mode %s, Iteration %d: Cycle completed successfully.", mp, currentMode, iteration), true)
+                            }
                             time.Sleep(150 * time.Millisecond)
                         }
                     }
                 }(mode)
             }
             modeWg.Wait()
-            utils.LogMessage(fmt.Sprintf("All test modes finished or stopped for mount point %s.", mp), debug)
+            if debug {
+                utils.LogMessage(fmt.Sprintf("All test modes finished for mount point %s.", mp), true)
+            }
         }(mountPoint)
     }
-
     mountWg.Wait()
-    utils.LogMessage("All mount point test goroutines have finished.", debug)
+    if debug {
+        utils.LogMessage("All mount point test goroutines have finished.", true)
+    }
 }
 
 // performDiskWrite writes data to a file
-func performDiskWrite(filePath string, data []byte, mode string, blockSize int64) (err error) {
+func performDiskWrite(filePath string, data []byte, mode string, blockSize int64) error {
     if _, statErr := os.Stat(filePath); statErr == nil {
         if rmErr := os.Remove(filePath); rmErr != nil {
             return fmt.Errorf("failed to remove existing file (%s): %w", filePath, rmErr)
@@ -235,24 +295,22 @@ func performDiskWrite(filePath string, data []byte, mode string, blockSize int64
     if err != nil {
         return fmt.Errorf("failed to open/create file for writing (%s): %w", filePath, err)
     }
+    defer file.Close()
 
     totalSize := int64(len(data))
-    var totalBytesWritten int64 = 0
+    var totalBytesWritten int64
 
     if mode == "sequential" {
         n, writeErr := file.Write(data)
         totalBytesWritten = int64(n)
         if writeErr != nil {
-            file.Close()
             return fmt.Errorf("sequential write error on %s after writing %d bytes: %w", filePath, totalBytesWritten, writeErr)
         }
         if totalBytesWritten != totalSize {
-            file.Close()
             return fmt.Errorf("sequential write short write on %s: wrote %d bytes, expected %d", filePath, totalBytesWritten, totalSize)
         }
     } else {
         if err := file.Truncate(totalSize); err != nil {
-            file.Close()
             return fmt.Errorf("failed to truncate file to required size %d for (%s): %w", totalSize, filePath, err)
         }
 
@@ -283,35 +341,26 @@ func performDiskWrite(filePath string, data []byte, mode string, blockSize int64
             }
 
             if start >= int64(len(data)) || end > int64(len(data)) {
-                file.Close()
                 return fmt.Errorf("internal logic error: calculated range [%d:%d] exceeds data length %d", start, end, len(data))
             }
 
             n, writeErr := file.WriteAt(data[start:end], start)
             totalBytesWritten += int64(n)
             if writeErr != nil {
-                file.Close()
                 return fmt.Errorf("random write error on %s at offset %d after writing %d bytes for this chunk: %w", filePath, start, n, writeErr)
             }
             if int64(n) != chunkSize {
-                file.Close()
                 return fmt.Errorf("random write short write on %s at offset %d: wrote %d bytes, expected %d", filePath, start, n, chunkSize)
             }
         }
 
         if totalBytesWritten != totalSize {
-            file.Close()
             return fmt.Errorf("random write total bytes written mismatch: wrote %d bytes, expected %d for %s", totalBytesWritten, totalSize, filePath)
         }
     }
 
     if syncErr := file.Sync(); syncErr != nil {
-        file.Close()
         return fmt.Errorf("failed to sync file (%s) after writing %d bytes: %w", filePath, totalBytesWritten, syncErr)
-    }
-
-    if closeErr := file.Close(); closeErr != nil {
-        return fmt.Errorf("failed to close file (%s) after writing and sync: %w", filePath, closeErr)
     }
 
     fileInfo, statErr := os.Stat(filePath)
@@ -382,7 +431,7 @@ func performDiskReadAndVerify(filePath string, originalData []byte, mode string,
             blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
         })
 
-        var totalBytesRead int64 = 0
+        var totalBytesRead int64
         for _, blockIdx := range blockOrder {
             start := blockIdx * blockSize
             end := start + blockSize

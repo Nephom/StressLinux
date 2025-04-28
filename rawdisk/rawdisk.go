@@ -14,10 +14,11 @@ import (
     "unsafe"
 )
 
-// RunRawDiskStressTest runs stress tests on raw disk devices
-func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig RawDiskTestConfig, perfStats *config.PerformanceStats, debug bool) {
+// RunRawDiskStressTest runs stress tests on raw disk devices with optimized memory usage and dynamic stats interval
+func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig RawDiskTestConfig, perfStats *config.PerformanceStats, debug bool, duration string) {
     defer wg.Done()
 
+    // Validate and set defaults
     if len(testConfig.DevicePaths) == 0 {
         errorMsg := "No raw disk devices specified for testing"
         errorChan <- errorMsg
@@ -40,6 +41,24 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
         utils.LogMessage(fmt.Sprintf("Warning: TestSize (%s) is smaller than BlockSize (%s) for random mode.",
             utils.FormatSize(testConfig.TestSize), utils.FormatSize(testConfig.BlockSize)), true)
     }
+
+    // Calculate stats interval based on duration
+    dur, err := time.ParseDuration(duration)
+    if err != nil {
+        errorMsg := fmt.Sprintf("Invalid duration format: %v", err)
+        errorChan <- errorMsg
+        utils.LogMessage(errorMsg, true)
+        return
+    }
+    durSeconds := int64(dur.Seconds())
+    var statsInterval int64
+    if durSeconds <= 60 {
+        statsInterval = 10 // 10 seconds for short durations
+    } else {
+        statsInterval = durSeconds / 60 // e.g., 3600s -> 60s, 86400s -> 1440s
+    }
+    ticker := time.NewTicker(time.Duration(statsInterval) * time.Second)
+    defer ticker.Stop()
 
     var testModes []string
     if testConfig.TestMode == "both" {
@@ -70,7 +89,6 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                 utils.LogMessage(errorMsg, true)
                 return
             }
-
             mode := info.Mode()
             if mode&os.ModeDevice == 0 {
                 errorMsg := fmt.Sprintf("%s is not a device", dp)
@@ -119,8 +137,26 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                 return
             }
 
-            utils.LogMessage(fmt.Sprintf("Device %s checked: OK (Size: %s, Start Offset: %s, Test Size: %s)",
-                dp, utils.FormatSize(deviceSize), utils.FormatSize(testConfig.StartOffset), utils.FormatSize(testConfig.TestSize)), debug)
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Device %s checked: OK (Size: %s, Start Offset: %s, Test Size: %s)",
+                    dp, utils.FormatSize(deviceSize), utils.FormatSize(testConfig.StartOffset), utils.FormatSize(testConfig.TestSize)), true)
+            }
+
+            // Generate random data once per device
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Generating %s of random data for tests on %s...", utils.FormatSize(testConfig.TestSize), dp), true)
+            }
+            rawBuffer, data := alignedBuffer(testConfig.TestSize)
+            _ = rawBuffer // Keep reference to prevent GC
+            if _, err := rand.Read(data[:testConfig.TestSize]); err != nil {
+                errorMsg := fmt.Sprintf("Failed to generate random data for %s: %v", dp, err)
+                errorChan <- errorMsg
+                utils.LogMessage(errorMsg, true)
+                return
+            }
+            if debug {
+                utils.LogMessage(fmt.Sprintf("Random data generated for %s.", dp), true)
+            }
 
             modeWg := &sync.WaitGroup{}
             for _, mode := range testModes {
@@ -128,52 +164,30 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                 go func(currentMode string) {
                     defer modeWg.Done()
 
-                    // Generate mode-specific data with proper alignment
-                    utils.LogMessage(fmt.Sprintf("Generating %s of random data for tests on %s (mode: %s)...",
-                        utils.FormatSize(testConfig.TestSize), dp, currentMode), debug)
-
-                    // Ensure 4KB alignment for O_DIRECT
-                    alignedSize := ((testConfig.TestSize + 4095) / 4096) * 4096
-
-                    // Allocate memory with additional space for alignment adjustment
-                    rawBuffer := make([]byte, alignedSize+4096)
-
-                    // Calculate alignment offset - fixed type conversion
-                    addr := uintptr(unsafe.Pointer(&rawBuffer[0]))
-                    alignmentOffset := uintptr(4096) - (addr % uintptr(4096))
-                    if alignmentOffset == uintptr(4096) {
-                        alignmentOffset = 0
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("Starting raw disk test for %s (mode: %s, size: %s, block: %s, offset: %s)",
+                            dp, currentMode, utils.FormatSize(testConfig.TestSize), utils.FormatSize(testConfig.BlockSize), utils.FormatSize(testConfig.StartOffset)), true)
                     }
-
-                    // Create properly aligned slice from the buffer
-                    data := rawBuffer[alignmentOffset : alignmentOffset+uintptr(alignedSize)]
-
-                    // Fill with random data
-                    if _, err := rand.Read(data[:testConfig.TestSize]); err != nil {
-                        errorMsg := fmt.Sprintf("Failed to generate random data for %s (mode: %s): %v", dp, currentMode, err)
-                        errorChan <- errorMsg
-                        utils.LogMessage(errorMsg, true)
-                        return
-                    }
-                    utils.LogMessage(fmt.Sprintf("Random data generated for %s (mode: %s).", dp, currentMode), debug)
-
-                    utils.LogMessage(fmt.Sprintf("Starting raw disk test goroutine for device: %s (mode: %s, size: %s, block: %s, offset: %s)",
-                        dp, currentMode, utils.FormatSize(testConfig.TestSize), utils.FormatSize(testConfig.BlockSize),
-                        utils.FormatSize(testConfig.StartOffset)), debug)
 
                     seed := time.Now().UnixNano()
                     iteration := 0
                     for {
-                        iteration++
-                        utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Starting cycle.", dp, currentMode, iteration), debug)
-
                         select {
                         case <-stop:
-                            utils.LogMessage(fmt.Sprintf("Raw disk test stopped on %s (mode: %s)", dp, currentMode), debug)
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Raw disk test stopped on %s (mode: %s)", dp, currentMode), true)
+                            }
                             return
                         default:
+                            iteration++
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Starting cycle.", dp, currentMode, iteration), true)
+                            }
+
                             // Perform write operation
-                            utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Performing write...", dp, currentMode, iteration), debug)
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Performing write...", dp, currentMode, iteration), true)
+                            }
                             writeStart := time.Now()
                             writeErr := performRawDiskWrite(dp, data[:testConfig.TestSize], currentMode, testConfig.BlockSize, testConfig.StartOffset, seed)
                             writeDuration := time.Since(writeStart)
@@ -187,18 +201,13 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                                 continue
                             }
 
-                            writeSpeedMBps := float64(0)
-                            if writeDuration.Seconds() > 0 {
-                                writeSpeedMBps = float64(testConfig.TestSize) / writeDuration.Seconds() / (1024 * 1024)
-                            }
-                            utils.LogMessage(fmt.Sprintf("Raw disk write on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
-                                dp, currentMode, iteration, writeSpeedMBps, utils.FormatSize(testConfig.TestSize), writeDuration), debug)
-
-                            // Ensure data is actually written to disk before reading
+                            // Ensure data is written to disk
                             time.Sleep(50 * time.Millisecond)
 
                             // Perform read and verify operation
-                            utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Performing read and verify...", dp, currentMode, iteration), debug)
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Performing read and verify...", dp, currentMode, iteration), true)
+                            }
                             readStart := time.Now()
                             readErr := performRawDiskReadAndVerify(dp, data[:testConfig.TestSize], currentMode, testConfig.BlockSize, testConfig.StartOffset, seed)
                             readDuration := time.Since(readStart)
@@ -212,36 +221,49 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                                 continue
                             }
 
-                            readSpeedMBps := float64(0)
-                            if readDuration.Seconds() > 0 {
-                                readSpeedMBps = float64(testConfig.TestSize) / readDuration.Seconds() / (1024 * 1024)
-                            }
-                            utils.LogMessage(fmt.Sprintf("Raw disk read/verify on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
-                                dp, currentMode, iteration, readSpeedMBps, utils.FormatSize(testConfig.TestSize), readDuration), debug)
-
-                            // Update performance statistics
-                            perfStats.Lock()
-                            diskPerfKey := fmt.Sprintf("raw:%s|%s|%d", dp, currentMode, testConfig.BlockSize)
-                            found := false
-                            for i, rdp := range perfStats.RawDisk {
-                                existingKey := fmt.Sprintf("raw:%s|%s|%d", rdp.DevicePath, rdp.Mode, rdp.BlockSize)
-                                if existingKey == diskPerfKey {
-                                    if readSpeedMBps > rdp.ReadSpeed {
-                                        perfStats.RawDisk[i].ReadSpeed = readSpeedMBps
-                                        utils.LogMessage(fmt.Sprintf("Updated best read speed for %s: %.2f MB/s", diskPerfKey, readSpeedMBps), debug)
-                                    }
-                                    if writeSpeedMBps > rdp.WriteSpeed {
-                                        perfStats.RawDisk[i].WriteSpeed = writeSpeedMBps
-                                        utils.LogMessage(fmt.Sprintf("Updated best write speed for %s: %.2f MB/s", diskPerfKey, writeSpeedMBps), debug)
-                                    }
-                                    perfStats.RawDisk[i].WriteCount++
-                                    perfStats.RawDisk[i].ReadCount++
-                                    found = true
-                                    break
+                            // Update stats only on ticker
+                            select {
+                            case <-ticker.C:
+                                writeSpeedMBps := float64(0)
+                                if writeDuration.Seconds() > 0 {
+                                    writeSpeedMBps = float64(testConfig.TestSize) / writeDuration.Seconds() / (1024 * 1024)
                                 }
-                            }
+                                readSpeedMBps := float64(0)
+                                if readDuration.Seconds() > 0 {
+                                    readSpeedMBps = float64(testConfig.TestSize) / readDuration.Seconds() / (1024 * 1024)
+                                }
 
-                            if !found {
+                                if debug {
+                                    utils.LogMessage(fmt.Sprintf("Raw disk write on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
+                                        dp, currentMode, iteration, writeSpeedMBps, utils.FormatSize(testConfig.TestSize), writeDuration), true)
+                                    utils.LogMessage(fmt.Sprintf("Raw disk read/verify on %s (mode: %s, iter: %d): %.2f MB/s (%s in %v)",
+                                        dp, currentMode, iteration, readSpeedMBps, utils.FormatSize(testConfig.TestSize), readDuration), true)
+                                }
+
+                                // Update performance statistics
+                                perfStats.Lock()
+                                diskPerfKey := fmt.Sprintf("raw:%s|%s|%d", dp, currentMode, testConfig.BlockSize)
+                                for i, rdp := range perfStats.RawDisk {
+                                    existingKey := fmt.Sprintf("raw:%s|%s|%d", rdp.DevicePath, rdp.Mode, rdp.BlockSize)
+                                    if existingKey == diskPerfKey {
+                                        if readSpeedMBps > rdp.ReadSpeed {
+                                            perfStats.RawDisk[i].ReadSpeed = readSpeedMBps
+                                            if debug {
+                                                utils.LogMessage(fmt.Sprintf("Updated best read speed for %s: %.2f MB/s", diskPerfKey, readSpeedMBps), true)
+                                            }
+                                        }
+                                        if writeSpeedMBps > rdp.WriteSpeed {
+                                            perfStats.RawDisk[i].WriteSpeed = writeSpeedMBps
+                                            if debug {
+                                                utils.LogMessage(fmt.Sprintf("Updated best write speed for %s: %.2f MB/s", diskPerfKey, writeSpeedMBps), true)
+                                            }
+                                        }
+                                        perfStats.RawDisk[i].WriteCount++
+                                        perfStats.RawDisk[i].ReadCount++
+                                        perfStats.Unlock()
+                                        continue
+                                    }
+                                }
                                 newPerf := config.RawDiskPerformance{
                                     DevicePath: dp,
                                     Mode:       currentMode,
@@ -252,25 +274,32 @@ func RunRawDiskStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan
                                     ReadCount:  1,
                                 }
                                 perfStats.RawDisk = append(perfStats.RawDisk, newPerf)
-                                utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s, Operations: Write=1, Read=1",
-                                    diskPerfKey, readSpeedMBps, writeSpeedMBps), debug)
+                                if debug {
+                                    utils.LogMessage(fmt.Sprintf("Added initial perf record for %s: Read=%.2f MB/s, Write=%.2f MB/s", diskPerfKey, readSpeedMBps, writeSpeedMBps), true)
+                                }
+                                perfStats.Unlock()
+                            default:
+                                // Continue without updating stats
                             }
-                            perfStats.Unlock()
 
-                            utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Cycle completed successfully. Sleeping.",
-                                dp, currentMode, iteration), debug)
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("Device %s, Mode %s, Iteration %d: Cycle completed successfully.", dp, currentMode, iteration), true)
+                            }
                             time.Sleep(150 * time.Millisecond)
                         }
                     }
                 }(mode)
             }
             modeWg.Wait()
-            utils.LogMessage(fmt.Sprintf("All test modes finished or stopped for device %s.", dp), debug)
+            if debug {
+                utils.LogMessage(fmt.Sprintf("All test modes finished for device %s.", dp), true)
+            }
         }(devicePath)
     }
-
     deviceWg.Wait()
-    utils.LogMessage("All raw disk device test goroutines have finished.", debug)
+    if debug {
+        utils.LogMessage("All raw disk device test goroutines have finished.", true)
+    }
 }
 
 // getDeviceSize gets the size of a block device using ioctl
@@ -286,21 +315,14 @@ func getDeviceSize(fd uintptr) (int64, error) {
 
 // alignedBuffer allocates a buffer aligned to 4KB for O_DIRECT operations
 func alignedBuffer(size int64) ([]byte, []byte) {
-    // Use fixed sizes to avoid type conversion issues
     alignSize := 4096
     alignedSize := ((size + int64(alignSize) - 1) / int64(alignSize)) * int64(alignSize)
-
-    // Allocate with extra space for alignment adjustment
     rawBuffer := make([]byte, alignedSize+int64(alignSize))
-
-    // Calculate alignment offset using proper type conversions
     addr := uintptr(unsafe.Pointer(&rawBuffer[0]))
     offset := uintptr(alignSize) - (addr % uintptr(alignSize))
     if offset == uintptr(alignSize) {
         offset = 0
     }
-
-    // Return both the raw buffer (to prevent GC) and the aligned slice
     return rawBuffer, rawBuffer[offset : offset+uintptr(alignedSize)]
 }
 
@@ -317,32 +339,25 @@ func performRawDiskWrite(devicePath string, data []byte, mode string, blockSize 
     defer device.Close()
 
     totalSize := int64(len(data))
-    var totalBytesWritten int64 = 0
+    var totalBytesWritten int64
 
     if mode == "sequential" {
-        // For sequential mode, write the entire buffer at once
         rawBuffer, alignedData := alignedBuffer(totalSize)
         _ = rawBuffer // Keep reference to prevent GC
-
         copy(alignedData, data)
-
-        n, writeErr := device.WriteAt(alignedData, startOffset)
+        n, writeErr := device.WriteAt(alignedData[:totalSize], startOffset)
         totalBytesWritten = int64(n)
         if writeErr != nil {
-            return fmt.Errorf("sequential write error on %s after writing %d bytes at offset %d: %w",
-                devicePath, totalBytesWritten, startOffset, writeErr)
+            return fmt.Errorf("sequential write error on %s after writing %d bytes at offset %d: %w", devicePath, totalBytesWritten, startOffset, writeErr)
         }
         if totalBytesWritten != totalSize {
-            return fmt.Errorf("sequential write short write on %s: wrote %d bytes, expected %d",
-                devicePath, totalBytesWritten, totalSize)
+            return fmt.Errorf("sequential write short write on %s: wrote %d bytes, expected %d", devicePath, totalBytesWritten, totalSize)
         }
     } else {
-        // For random mode, write blocks in random order
         blocks := totalSize / blockSize
         if totalSize%blockSize > 0 {
             blocks++
         }
-
         blockOrder := make([]int64, blocks)
         for i := int64(0); i < blocks; i++ {
             blockOrder[i] = i
@@ -352,7 +367,6 @@ func performRawDiskWrite(devicePath string, data []byte, mode string, blockSize 
             blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
         })
 
-        // Allocate a single aligned buffer for block operations
         rawBlockBuffer, alignedBlockBuffer := alignedBuffer(blockSize)
         _ = rawBlockBuffer // Keep reference to prevent GC
 
@@ -366,44 +380,31 @@ func performRawDiskWrite(devicePath string, data []byte, mode string, blockSize 
             if chunkSize <= 0 {
                 continue
             }
-
             if dataStart >= int64(len(data)) || dataEnd > int64(len(data)) {
-                return fmt.Errorf("internal logic error: calculated range [%d:%d] exceeds data length %d",
-                    dataStart, dataEnd, len(data))
+                return fmt.Errorf("internal logic error: calculated range [%d:%d] exceeds data length %d", dataStart, dataEnd, len(data))
             }
 
-            // Copy data to aligned buffer
             copy(alignedBlockBuffer[:chunkSize], data[dataStart:dataEnd])
-
             deviceOffset := startOffset + dataStart
             n, writeErr := device.WriteAt(alignedBlockBuffer[:chunkSize], deviceOffset)
             totalBytesWritten += int64(n)
             if writeErr != nil {
-                return fmt.Errorf("random write error on %s at offset %d after writing %d bytes for this chunk: %w",
-                    devicePath, deviceOffset, n, writeErr)
+                return fmt.Errorf("random write error on %s at offset %d after writing %d bytes: %w", devicePath, deviceOffset, n, writeErr)
             }
             if int64(n) != chunkSize {
-                return fmt.Errorf("random write short write on %s at offset %d: wrote %d bytes, expected %d",
-                    devicePath, deviceOffset, n, chunkSize)
+                return fmt.Errorf("random write short write on %s at offset %d: wrote %d bytes, expected %d", devicePath, deviceOffset, n, chunkSize)
             }
         }
-
         if totalBytesWritten != totalSize {
-            return fmt.Errorf("random write total bytes written mismatch: wrote %d bytes, expected %d for %s",
-                totalBytesWritten, totalSize, devicePath)
+            return fmt.Errorf("random write total bytes mismatch: wrote %d bytes, expected %d for %s", totalBytesWritten, totalSize, devicePath)
         }
     }
 
-    // Ensure data is flushed to disk
     if err := device.Sync(); err != nil {
-        return fmt.Errorf("failed to sync device (%s) after writing %d bytes: %w",
-            devicePath, totalBytesWritten, err)
+        return fmt.Errorf("failed to sync device (%s) after writing %d bytes: %w", devicePath, totalBytesWritten, err)
     }
-
-    // Call fsync explicitly for extra safety
     if err := syscall.Fsync(int(device.Fd())); err != nil {
-        return fmt.Errorf("failed to fsync device (%s) after writing %d bytes: %w",
-            devicePath, totalBytesWritten, err)
+        return fmt.Errorf("failed to fsync device (%s) after writing %d bytes: %w", devicePath, totalBytesWritten, err)
     }
 
     return nil
@@ -423,31 +424,23 @@ func performRawDiskReadAndVerify(devicePath string, originalData []byte, mode st
     defer device.Close()
 
     if mode == "sequential" {
-        // For sequential mode, read the entire buffer at once with proper alignment
         rawBuffer, readData := alignedBuffer(expectedSize)
         _ = rawBuffer // Keep reference to prevent GC
-
         n, readErr := device.ReadAt(readData[:expectedSize], startOffset)
         if readErr != nil && readErr != io.EOF {
-            return fmt.Errorf("sequential read error on %s after reading %d bytes at offset %d: %w",
-                devicePath, n, startOffset, readErr)
+            return fmt.Errorf("sequential read error on %s after reading %d bytes at offset %d: %w", devicePath, n, startOffset, readErr)
         }
         if int64(n) != expectedSize {
-            return fmt.Errorf("sequential read short read on %s: read %d bytes, expected %d",
-                devicePath, n, expectedSize)
+            return fmt.Errorf("sequential read short read on %s: read %d bytes, expected %d", devicePath, n, expectedSize)
         }
-
-        // Compare read data with original data
         if !bytes.Equal(originalData, readData[:expectedSize]) {
             return identifyMismatch(devicePath, originalData, readData[:expectedSize], "sequential")
         }
     } else {
-        // For random mode, read blocks in the same random order as they were written
         blocks := expectedSize / blockSize
         if expectedSize%blockSize > 0 {
             blocks++
         }
-
         blockOrder := make([]int64, blocks)
         for i := int64(0); i < blocks; i++ {
             blockOrder[i] = i
@@ -457,15 +450,12 @@ func performRawDiskReadAndVerify(devicePath string, originalData []byte, mode st
             blockOrder[i], blockOrder[j] = blockOrder[j], blockOrder[i]
         })
 
-        // Allocate an aligned result buffer for the entire data
         rawResultBuffer, resultBuffer := alignedBuffer(expectedSize)
         _ = rawResultBuffer // Keep reference to prevent GC
-
-        // And a buffer for reading individual blocks
         rawBlockBuffer, blockBuffer := alignedBuffer(blockSize)
         _ = rawBlockBuffer // Keep reference to prevent GC
 
-        var totalBytesRead int64 = 0
+        var totalBytesRead int64
         for _, blockIdx := range blockOrder {
             dataStart := blockIdx * blockSize
             dataEnd := dataStart + blockSize
@@ -476,38 +466,23 @@ func performRawDiskReadAndVerify(devicePath string, originalData []byte, mode st
             if chunkSize <= 0 {
                 continue
             }
-
             deviceOffset := startOffset + dataStart
             n, readErr := device.ReadAt(blockBuffer[:chunkSize], deviceOffset)
             totalBytesRead += int64(n)
-
             if int64(n) != chunkSize {
-                return fmt.Errorf("random read short read on %s at offset %d: read %d bytes, expected %d (error: %v)",
-                    devicePath, deviceOffset, n, chunkSize, readErr)
+                return fmt.Errorf("random read short read on %s at offset %d: read %d bytes, expected %d (error: %v)", devicePath, deviceOffset, n, chunkSize, readErr)
             }
-
             if readErr != nil && readErr != io.EOF {
-                return fmt.Errorf("random read error on %s at offset %d after reading %d bytes for this chunk: %w",
-                    devicePath, deviceOffset, n, readErr)
+                return fmt.Errorf("random read error on %s at offset %d after reading %d bytes: %w", devicePath, deviceOffset, n, readErr)
             }
-
-            // Copy block data to the result buffer at the correct position
             copy(resultBuffer[dataStart:dataEnd], blockBuffer[:chunkSize])
-
-            // Also verify each block immediately
-            expectedBlock := originalData[dataStart:dataEnd]
-            if !bytes.Equal(expectedBlock, blockBuffer[:chunkSize]) {
-                return fmt.Errorf("data verification failed for block %d on device %s",
-                    blockIdx, devicePath)
+            if !bytes.Equal(originalData[dataStart:dataEnd], blockBuffer[:chunkSize]) {
+                return fmt.Errorf("data verification failed for block %d on device %s", blockIdx, devicePath)
             }
         }
-
         if totalBytesRead != expectedSize {
-            return fmt.Errorf("random read total bytes mismatch on %s: read %d bytes, expected %d",
-                devicePath, totalBytesRead, expectedSize)
+            return fmt.Errorf("random read total bytes mismatch on %s: read %d bytes, expected %d", devicePath, totalBytesRead, expectedSize)
         }
-
-        // Double-check the entire buffer as well
         if !bytes.Equal(originalData, resultBuffer[:expectedSize]) {
             return identifyMismatch(devicePath, originalData, resultBuffer[:expectedSize], "random (full buffer)")
         }
@@ -524,8 +499,6 @@ func identifyMismatch(devicePath string, originalData, readData []byte, mode str
     if len(readData) < limit {
         limit = len(readData)
     }
-
-    // Find the first mismatch
     for i := 0; i < limit; i++ {
         if originalData[i] != readData[i] {
             mismatchPos = int64(i)
@@ -534,24 +507,18 @@ func identifyMismatch(devicePath string, originalData, readData []byte, mode str
             break
         }
     }
-
-    // If no direct mismatch but lengths differ
     if mismatchPos == -1 && len(originalData) != len(readData) {
         mismatchPos = int64(limit)
         if len(originalData) > limit {
             originalByte = originalData[limit]
         }
     }
-
-    // Count total mismatches for better diagnosis
     mismatchCount := 0
     for i := 0; i < limit; i++ {
         if originalData[i] != readData[i] {
             mismatchCount++
         }
     }
-
-    // Create context around the mismatch
     var contextStart, contextEnd int
     if mismatchPos >= 0 {
         contextStart = int(mismatchPos) - 16
@@ -563,18 +530,12 @@ func identifyMismatch(devicePath string, originalData, readData []byte, mode str
             contextEnd = limit
         }
     }
-
     contextMsg := ""
     if contextStart < contextEnd {
         originalContext := fmt.Sprintf("Original[%d:%d]: % X", contextStart, contextEnd, originalData[contextStart:contextEnd])
         readContext := fmt.Sprintf("Read[%d:%d]: % X", contextStart, contextEnd, readData[contextStart:contextEnd])
         contextMsg = "\n" + originalContext + "\n" + readContext
     }
-
-    return fmt.Errorf("data verification failed for device %s in %s mode: "+
-        "read data does not match original data "+
-        "(lengths: original=%d, read=%d, mismatches=%d). First mismatch at byte %d "+
-        "(original: %d[0x%X], read: %d[0x%X])%s",
-        devicePath, mode, len(originalData), len(readData), mismatchCount, mismatchPos,
-        originalByte, originalByte, readByte, readByte, contextMsg)
+    return fmt.Errorf("data verification failed for device %s in %s mode: read data does not match original data (lengths: original=%d, read=%d, mismatches=%d). First mismatch at byte %d (original: %d[0x%X], read: %d[0x%X])%s",
+        devicePath, mode, len(originalData), len(readData), mismatchCount, mismatchPos, originalByte, originalByte, readByte, readByte, contextMsg)
 }
