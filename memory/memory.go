@@ -2,6 +2,7 @@ package memory
 
 import (
     "fmt"
+    "math"
     "math/rand"
     "runtime"
     "stress/config"
@@ -14,8 +15,23 @@ import (
 
 // RunMemoryStressTest runs the memory stress test
 func LogMemoryAddress(arrIdx, elemIdx int, arrays [][]int64) string {
+    // 修正1: 防止陣列索引計算溢位
+    if arrIdx < 0 || arrIdx >= len(arrays) || elemIdx < 0 || elemIdx >= len(arrays[arrIdx]) {
+        return "0x0" // 返回無效地址標記
+    }
+    
     baseAddr := uintptr(unsafe.Pointer(&arrays[arrIdx][0]))
+    // 檢查乘法溢位
+    if elemIdx > 0 && uintptr(elemIdx) > (^uintptr(0))/8 {
+        return "0x0" // 防止溢位
+    }
     offset := uintptr(elemIdx) * 8
+    
+    // 檢查加法溢位
+    if baseAddr > ^uintptr(0)-offset {
+        return "0x0" // 防止溢位
+    }
+    
     return fmt.Sprintf("0x%x", baseAddr+offset)
 }
 
@@ -46,7 +62,23 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     damagedLocations = make(map[string]int)
 
     totalMem, _ := getSystemMemory()
-    targetMemBytes := uint64(float64(totalMem) * config.UsagePercent)
+    
+    // 修正2: 防止記憶體大小計算溢位和精度丟失
+    var targetMemBytes uint64
+    if config.UsagePercent < 0 {
+        config.UsagePercent = 0
+    } else if config.UsagePercent > 1.0 {
+        config.UsagePercent = 1.0
+    }
+    
+    // 使用更安全的計算方式
+    if totalMem > math.MaxUint64/100 {
+        // 防止中間計算溢位
+        targetMemBytes = totalMem / 100 * uint64(config.UsagePercent*100)
+    } else {
+        targetMemBytes = uint64(float64(totalMem) * config.UsagePercent)
+    }
+    
     if config.Debug {
         utils.LogMessage(fmt.Sprintf("Memory test targeting %.2f%% of total system memory (%.2f GB)",
             config.UsagePercent*100, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
@@ -64,7 +96,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     validationErrors := 0
     for i := 0; i < speedTestSize; i++ {
         speedTestArray[i] = int64(i * 2)
-        writeCount++
+        // 修正6: 防止計數器溢位
+        if writeCount < math.MaxUint64 {
+            writeCount++
+        }
     }
     writeDuration := time.Since(writeStart)
     bytesWritten := speedTestSize * 8
@@ -87,7 +122,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
             }
         }
         sum += val
-        readCount++
+        // 修正6: 防止計數器溢位
+        if readCount < math.MaxUint64 {
+            readCount++
+        }
     }
     readDuration := time.Since(readStart)
     bytesRead := speedTestSize * 8
@@ -140,7 +178,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         newVal := originalVal ^ 0x1
         speedTestArray[idx] = newVal
         modifications[idx] = newVal
-        randomCount++
+        // 修正6: 防止計數器溢位
+        if randomCount < math.MaxUint64 {
+            randomCount++
+        }
     }
     randomDuration := time.Since(randomStart)
     randomBytes := int64(len(randIndices) * 16)
@@ -170,10 +211,25 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     // Long-running memory stress test
     const arraySize = 10_000_000
     const bytesPerEntry = 8
-    arraysNeeded := int(targetMemBytes / (arraySize * bytesPerEntry))
+    
+    // 修正3: 防止陣列數量計算溢位
+    var arraysNeeded int
+    totalBytesNeeded := arraySize * bytesPerEntry
+    if totalBytesNeeded <= 0 || targetMemBytes < uint64(totalBytesNeeded) {
+        arraysNeeded = 1
+    } else {
+        arraysNeededUint64 := targetMemBytes / uint64(totalBytesNeeded)
+        if arraysNeededUint64 > uint64(math.MaxInt32) {
+            arraysNeeded = math.MaxInt32 // 限制最大陣列數量
+        } else {
+            arraysNeeded = int(arraysNeededUint64)
+        }
+    }
+    
     if arraysNeeded < 1 {
         arraysNeeded = 1
     }
+    
     if config.Debug {
         utils.LogMessage(fmt.Sprintf("Memory test allocating %d arrays of %d elements each", arraysNeeded, arraySize), config.Debug)
     }
@@ -193,6 +249,13 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     utils.LogMessage(fmt.Sprintf("Recovered from allocation panic: %v", r), config.Debug)
                 }
             }()
+            
+            // 修正5: 檢查記憶體分配大小
+            if arraySize <= 0 || arraySize > math.MaxInt32/8 {
+                utils.LogMessage("Array size too large for safe allocation", config.Debug)
+                return
+            }
+            
             arr = make([]int64, arraySize)
             arraySeed := seed + int64(i*1000)
             arraySeedValues = append(arraySeedValues, arraySeed)
@@ -214,7 +277,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         }()
         if arr != nil {
             arrays = append(arrays, arr)
-            bytesAllocated += arraySize * bytesPerEntry
+            // 修正6: 防止bytesAllocated溢位
+            if bytesAllocated <= math.MaxUint64-uint64(arraySize*bytesPerEntry) {
+                bytesAllocated += uint64(arraySize * bytesPerEntry)
+            }
             if config.Debug && (i+1)%10 == 0 {
                 allocPercent := float64(bytesAllocated) * 100 / float64(totalMem)
                 utils.LogMessage(fmt.Sprintf("Memory allocation progress: %d/%d arrays (%.2f%% of system memory)",
@@ -320,7 +386,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxRandomAccessSpeed = currentSpeedMBps
                 }
                 perfStats_.Memory.SumRandomAccessSpeed += currentSpeedMBps
-                perfStats_.Memory.RandomAccessCount++
+                // 修正6: 防止計數器溢位
+                if perfStats_.Memory.RandomAccessCount < math.MaxInt64 {
+                    perfStats_.Memory.RandomAccessCount++
+                }
                 perfStats_.Memory.ReadSpeed = readSpeedMBps
                 if readSpeedMBps < perfStats_.Memory.MinReadSpeed || perfStats_.Memory.MinReadSpeed == 0 {
                     perfStats_.Memory.MinReadSpeed = readSpeedMBps
@@ -329,7 +398,9 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxReadSpeed = readSpeedMBps
                 }
                 perfStats_.Memory.SumReadSpeed += readSpeedMBps
-                perfStats_.Memory.ReadSpeedCount++
+                if perfStats_.Memory.ReadSpeedCount < math.MaxInt64 {
+                    perfStats_.Memory.ReadSpeedCount++
+                }
                 perfStats_.Memory.WriteSpeed = writeSpeedMBps
                 if writeSpeedMBps < perfStats_.Memory.MinWriteSpeed || perfStats_.Memory.MinWriteSpeed == 0 {
                     perfStats_.Memory.MinWriteSpeed = writeSpeedMBps
@@ -338,7 +409,9 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxWriteSpeed = writeSpeedMBps
                 }
                 perfStats_.Memory.SumWriteSpeed += writeSpeedMBps
-                perfStats_.Memory.WriteSpeedCount++
+                if perfStats_.Memory.WriteSpeedCount < math.MaxInt64 {
+                    perfStats_.Memory.WriteSpeedCount++
+                }
                 perfStats_.Unlock()
                 if config.Debug {
                     utils.LogMessage(fmt.Sprintf("Performance update: Random Access Speed %.2f MB/s, Read Speed %.2f MB/s, Write Speed %.2f MB/s",
@@ -368,9 +441,14 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     damagedLocationsLock.Unlock()
 
                     if actualVal != expectedVal {
-                        localErrors++
+                        // 修正6: 防止計數器溢位
+                        if localErrors < math.MaxUint64 {
+                            localErrors++
+                        }
                         damagedLocationsLock.Lock()
-                        damagedLocations[address]++
+                        if damagedLocations[address] < math.MaxInt32 {
+                            damagedLocations[address]++
+                        }
                         damagedLocationsLock.Unlock()
 
                         errorRecordsLock.Lock()
@@ -404,7 +482,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                 checkpointDataLock.Unlock()
             }
 
-            memValidationErrors += localErrors
+            // 修正6: 防止計數器溢位
+            if memValidationErrors <= math.MaxUint64-localErrors {
+                memValidationErrors += localErrors
+            }
             validationDuration := time.Since(validationStart)
 
             if localErrors > 0 {
@@ -438,11 +519,16 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
 
         default:
             for i := 0; i < 1000 && operationsSinceLastValidation < 5000; i++ {
+                // 修正4: 防止隨機數範圍錯誤
                 if len(arrays) == 0 {
                     break
                 }
                 arrIdx := threadRNG.Intn(len(arrays))
-                elemIdx := threadRNG.Intn(arraySize)
+                if arrIdx >= len(arrays) || len(arrays[arrIdx]) == 0 {
+                    continue
+                }
+                elemIdx := threadRNG.Intn(len(arrays[arrIdx]))
+                
                 address := LogMemoryAddress(arrIdx, elemIdx, arrays)
                 damagedLocationsLock.Lock()
                 if damagedLocations[address] >= 3 {
@@ -465,11 +551,19 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                 }
 
                 perfStats_.Lock()
-                perfStats_.Memory.RandomAccessCount++
+                // 修正6: 防止計數器溢位
+                if perfStats_.Memory.RandomAccessCount < math.MaxUint64 {
+                    perfStats_.Memory.RandomAccessCount++
+                }
                 perfStats_.Unlock()
 
-                operationCount++
-                operationsSinceLastValidation++
+                // 修正6: 防止計數器溢位
+                if operationCount < math.MaxUint64 {
+                    operationCount++
+                }
+                if operationsSinceLastValidation < math.MaxUint64 {
+                    operationsSinceLastValidation++
+                }
             }
 
             if threadRNG.Intn(10_000) == 0 {

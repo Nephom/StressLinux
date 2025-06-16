@@ -107,7 +107,7 @@ func main() {
     }
 
     if showHelp {
-        fmt.Println("System Stress Test Tool")
+        fmt.Println("System Stress Test Tool v2")
         fmt.Println("Usage: stress [options]")
         fmt.Println("\nOptions:")
         flag.PrintDefaults()
@@ -117,6 +117,8 @@ func main() {
         fmt.Println("- Use -print or -list to view available system resources.")
         fmt.Println("- Use -scan to update config.json with system resources.")
         fmt.Println("- Raw disk tests (-disk) require 'sequential' or 'random' mode; 'both' is not supported.")
+		fmt.Println("")
+		fmt.Println("- Due to all tests will need memory size, so if you run all tests, the memory usage must be 80% as well.")
         return
     }
 
