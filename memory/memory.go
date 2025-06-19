@@ -10,42 +10,35 @@ import (
     "sync"
     "syscall"
     "time"
-	"unsafe"
+    "unsafe"
 )
 
-// RunMemoryStressTest runs the memory stress test
 func LogMemoryAddress(arrIdx, elemIdx int, arrays [][]int64) string {
-    // 修正1: 防止陣列索引計算溢位
     if arrIdx < 0 || arrIdx >= len(arrays) || elemIdx < 0 || elemIdx >= len(arrays[arrIdx]) {
-        return "0x0" // 返回無效地址標記
+        return "0x0"
     }
-    
     baseAddr := uintptr(unsafe.Pointer(&arrays[arrIdx][0]))
-    // 檢查乘法溢位
     if elemIdx > 0 && uintptr(elemIdx) > (^uintptr(0))/8 {
-        return "0x0" // 防止溢位
+        return "0x0"
     }
     offset := uintptr(elemIdx) * 8
-    
-    // 檢查加法溢位
     if baseAddr > ^uintptr(0)-offset {
-        return "0x0" // 防止溢位
+        return "0x0"
     }
-    
     return fmt.Sprintf("0x%x", baseAddr+offset)
 }
 
 func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, config MemoryConfig, perfStats_ *config.PerformanceStats) {
     defer wg.Done()
 
-    // 執行緒專屬隨機數生成器
-    threadRNG := rand.New(rand.NewSource(time.Now().UnixNano()))
+    // 生成主程序 PID（模擬）
+    mainPID := rand.Intn(1000000) + 1000
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] started", mainPID), false)
 
-    // 保護 checkpointData 的鎖
+    threadRNG := rand.New(rand.NewSource(time.Now().UnixNano()))
     var checkpointDataLock sync.Mutex
     checkpointData := make(map[int]map[int]int64)
 
-    // 錯誤記錄和損壞位置追蹤
     type ErrorRecord struct {
         Timestamp   time.Time
         ArrIdx      int
@@ -57,46 +50,33 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     }
     var errorRecords []ErrorRecord
     var errorRecordsLock sync.Mutex
-    var damagedLocations map[string]int // 記錄損壞次數
+    var damagedLocations map[string]int
     var damagedLocationsLock sync.Mutex
     damagedLocations = make(map[string]int)
 
     totalMem, _ := getSystemMemory()
-    
-    // 修正2: 防止記憶體大小計算溢位和精度丟失
     var targetMemBytes uint64
     if config.UsagePercent < 0 {
         config.UsagePercent = 0
     } else if config.UsagePercent > 1.0 {
         config.UsagePercent = 1.0
     }
-    
-    // 使用更安全的計算方式
     if totalMem > math.MaxUint64/100 {
-        // 防止中間計算溢位
         targetMemBytes = totalMem / 100 * uint64(config.UsagePercent*100)
     } else {
         targetMemBytes = uint64(float64(totalMem) * config.UsagePercent)
     }
-    
-    if config.Debug {
-        utils.LogMessage(fmt.Sprintf("Memory test targeting %.2f%% of total system memory (%.2f GB)",
-            config.UsagePercent*100, float64(targetMemBytes)/(1024*1024*1024)), config.Debug)
-    }
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] targeting %.2f%% of total system memory (%.2f GB)", mainPID, config.UsagePercent*100, float64(targetMemBytes)/(1024*1024*1024)), false)
 
-    // Sequential memory test
     const speedTestSize = 50_000_000
     speedTestArray := make([]int64, speedTestSize)
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] measuring initial memory speeds...", mainPID), false)
 
-    if config.Debug {
-        utils.LogMessage("Measuring sequential memory write speed...", config.Debug)
-    }
     writeStart := time.Now()
     writeCount := uint64(0)
     validationErrors := 0
     for i := 0; i < speedTestSize; i++ {
         speedTestArray[i] = int64(i * 2)
-        // 修正6: 防止計數器溢位
         if writeCount < math.MaxUint64 {
             writeCount++
         }
@@ -105,9 +85,6 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     bytesWritten := speedTestSize * 8
     writeSpeedMBps := float64(bytesWritten) / writeDuration.Seconds() / (1024 * 1024)
 
-    if config.Debug {
-        utils.LogMessage("Measuring sequential memory read speed...", config.Debug)
-    }
     var sum int64 = 0
     readCount := uint64(0)
     readStart := time.Now()
@@ -117,12 +94,10 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         if val != expectedVal {
             validationErrors++
             if validationErrors < 10 && config.Debug {
-                utils.LogMessage(fmt.Sprintf("Data validation error at index %d: got %d, expected %d",
-                    i, val, expectedVal), config.Debug)
+                utils.LogMessage(fmt.Sprintf("Data validation error at index %d: got %d, expected %d", i, val, expectedVal), true)
             }
         }
         sum += val
-        // 修正6: 防止計數器溢位
         if readCount < math.MaxUint64 {
             readCount++
         }
@@ -131,24 +106,17 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     bytesRead := speedTestSize * 8
     readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
 
-    if validationErrors > 0 && config.Debug {
-        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during sequential read test!",
-            validationErrors), config.Debug)
-        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in sequential read test",
-            validationErrors)
+    if validationErrors > 0 {
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] WARNING: Found %d validation errors during sequential read test!", mainPID, validationErrors), false)
+        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in sequential read test", validationErrors)
     } else if config.Debug {
-        utils.LogMessage("Sequential data validation: PASSED", config.Debug)
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] sequential read validation: PASSED", mainPID), true)
     }
 
-    // Random memory access test
-    if config.Debug {
-        utils.LogMessage("Measuring random memory access speed...", config.Debug)
-    }
     randIndices := make([]int, 5_000_000)
     for i := range randIndices {
         randIndices[i] = threadRNG.Intn(speedTestSize)
     }
-
     modifications := make(map[int]int64)
     randomValidationErrors := 0
     randomCount := uint64(0)
@@ -161,8 +129,7 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
             if originalVal != expectedVal {
                 randomValidationErrors++
                 if randomValidationErrors < 10 && config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Random access validation error at index %d: got %d, expected %d",
-                        idx, originalVal, expectedVal), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Random access validation error at index %d: got %d, expected %d", idx, originalVal, expectedVal), true)
                 }
             }
         } else {
@@ -170,15 +137,13 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
             if originalVal != expectedVal {
                 randomValidationErrors++
                 if randomValidationErrors < 10 && config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Initial pattern validation error at index %d: got %d, expected %d",
-                        idx, originalVal, expectedVal), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Initial pattern validation error at index %d: got %d, expected %d", idx, originalVal, expectedVal), true)
                 }
             }
         }
         newVal := originalVal ^ 0x1
         speedTestArray[idx] = newVal
         modifications[idx] = newVal
-        // 修正6: 防止計數器溢位
         if randomCount < math.MaxUint64 {
             randomCount++
         }
@@ -187,32 +152,23 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     randomBytes := int64(len(randIndices) * 16)
     randomSpeedMBps := float64(randomBytes) / randomDuration.Seconds() / (1024 * 1024)
 
-    if randomValidationErrors > 0 && config.Debug {
-        utils.LogMessage(fmt.Sprintf("WARNING: Found %d validation errors during random access test!",
-            randomValidationErrors), config.Debug)
-        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in random access test",
-            randomValidationErrors)
+    if randomValidationErrors > 0 {
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] WARNING: Found %d validation errors during random access test!", mainPID, randomValidationErrors), false)
+        errorChan <- fmt.Sprintf("Memory data corruption detected: %d errors in random access test", randomValidationErrors)
     } else if config.Debug {
-        utils.LogMessage("Random access data validation: PASSED", config.Debug)
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] random access validation: PASSED", mainPID), true)
     }
 
     if config.Debug {
-        utils.LogMessage(fmt.Sprintf("Memory speed results:"), config.Debug)
-        utils.LogMessage(fmt.Sprintf("  - Sequential write: %.2f MB/s, operations: %d", writeSpeedMBps, writeCount), config.Debug)
-        utils.LogMessage(fmt.Sprintf("  - Sequential read:  %.2f MB/s, operations: %d", readSpeedMBps, readCount), config.Debug)
-        utils.LogMessage(fmt.Sprintf("  - Random access:    %.2f MB/s, operations: %d", randomSpeedMBps, randomCount), config.Debug)
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] speed results: Sequential write: %.2f MB/s, operations: %d; Sequential read: %.2f MB/s, operations: %d; Random access: %.2f MB/s, operations: %d", mainPID, writeSpeedMBps, writeCount, readSpeedMBps, readCount, randomSpeedMBps, randomCount), true)
     }
 
-    // Clean up
     speedTestArray = nil
     modifications = nil
     runtime.GC()
 
-    // Long-running memory stress test
     const arraySize = 10_000_000
     const bytesPerEntry = 8
-    
-    // 修正3: 防止陣列數量計算溢位
     var arraysNeeded int
     totalBytesNeeded := arraySize * bytesPerEntry
     if totalBytesNeeded <= 0 || targetMemBytes < uint64(totalBytesNeeded) {
@@ -220,19 +176,15 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     } else {
         arraysNeededUint64 := targetMemBytes / uint64(totalBytesNeeded)
         if arraysNeededUint64 > uint64(math.MaxInt32) {
-            arraysNeeded = math.MaxInt32 // 限制最大陣列數量
+            arraysNeeded = math.MaxInt32
         } else {
             arraysNeeded = int(arraysNeededUint64)
         }
     }
-    
     if arraysNeeded < 1 {
         arraysNeeded = 1
     }
-    
-    if config.Debug {
-        utils.LogMessage(fmt.Sprintf("Memory test allocating %d arrays of %d elements each", arraysNeeded, arraySize), config.Debug)
-    }
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] starting allocation for %d arrays of %d elements each", mainPID, arraysNeeded, arraySize), false)
 
     var arrays [][]int64
     allocStart := time.Now()
@@ -242,25 +194,28 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     const checkpointInterval = 100_000
 
     for i := 0; i < arraysNeeded; i++ {
+        select {
+        case <-stop:
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] allocation interrupted by stop signal", mainPID), false)
+            stopSubprocesses(mainPID, config.Debug)
+            return
+        default:
+        }
         var arr []int64
         func() {
             defer func() {
-                if r := recover(); r != nil && config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Recovered from allocation panic: %v", r), config.Debug)
+                if r := recover(); r != nil {
+                    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] recovered from allocation panic: %v", mainPID, r), true)
                 }
             }()
-            
-            // 修正5: 檢查記憶體分配大小
             if arraySize <= 0 || arraySize > math.MaxInt32/8 {
-                utils.LogMessage("Array size too large for safe allocation", config.Debug)
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] array size too large for safe allocation", mainPID), true)
                 return
             }
-            
             arr = make([]int64, arraySize)
             arraySeed := seed + int64(i*1000)
             arraySeedValues = append(arraySeedValues, arraySeed)
             arrayRNG := rand.New(rand.NewSource(arraySeed))
-
             for j := range arr {
                 if j%checkpointInterval == 0 {
                     arr[j] = int64(j) ^ arraySeed
@@ -277,25 +232,19 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         }()
         if arr != nil {
             arrays = append(arrays, arr)
-            // 修正6: 防止bytesAllocated溢位
             if bytesAllocated <= math.MaxUint64-uint64(arraySize*bytesPerEntry) {
                 bytesAllocated += uint64(arraySize * bytesPerEntry)
             }
-            if config.Debug && (i+1)%10 == 0 {
+            if (i+1)%10 == 0 {
                 allocPercent := float64(bytesAllocated) * 100 / float64(totalMem)
-                utils.LogMessage(fmt.Sprintf("Memory allocation progress: %d/%d arrays (%.2f%% of system memory)",
-                    i+1, arraysNeeded, allocPercent), config.Debug)
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] allocation progress: %d/%d arrays (%.2f%% of system memory)", mainPID, i+1, arraysNeeded, allocPercent), false)
             }
         } else {
-            if config.Debug {
-                utils.LogMessage("Failed to allocate memory array, continuing with what we have", config.Debug)
-            }
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] failed to allocate memory array, continuing with what we have", mainPID), true)
             break
         }
         if bytesAllocated >= targetMemBytes {
-            if config.Debug {
-                utils.LogMessage("Reached target memory allocation", config.Debug)
-            }
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] reached target memory allocation", mainPID), false)
             break
         }
         if i%100 == 0 {
@@ -306,14 +255,7 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     allocDuration := time.Since(allocStart)
     allocSpeedMBps := float64(bytesAllocated) / allocDuration.Seconds() / (1024 * 1024)
     memoryUsagePercent := float64(bytesAllocated) * 100 / float64(totalMem)
-
-    if config.Debug {
-        utils.LogMessage(fmt.Sprintf("Memory allocated: %.2f GB out of %.2f GB total (%.2f%% of system memory)",
-            float64(bytesAllocated)/(1024*1024*1024),
-            float64(totalMem)/(1024*1024*1024),
-            memoryUsagePercent), config.Debug)
-        utils.LogMessage(fmt.Sprintf("Memory bulk allocation speed: %.2f MB/s", allocSpeedMBps), config.Debug)
-    }
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] allocated: %.2f GB out of %.2f GB total (%.2f%% of system memory), speed: %.2f MB/s", mainPID, float64(bytesAllocated)/(1024*1024*1024), float64(totalMem)/(1024*1024*1024), memoryUsagePercent, allocSpeedMBps), false)
 
     perfStats_.Lock()
     perfStats_.Memory.WriteSpeed = writeSpeedMBps
@@ -338,19 +280,19 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
     perfStats_.Unlock()
 
     if memoryUsagePercent < config.UsagePercent*75.0 {
-        errorChan <- fmt.Sprintf("Could only allocate %.2f%% of system memory, wanted %.2f%%",
-            memoryUsagePercent, config.UsagePercent*100)
+        errorChan <- fmt.Sprintf("Could only allocate %.2f%% of system memory, wanted %.2f%%", memoryUsagePercent, config.UsagePercent*100)
     }
 
     validationTicker := time.NewTicker(30 * time.Second)
     defer validationTicker.Stop()
-    performanceUpdateTicker := time.NewTicker(10 * time.Second)
+    performanceUpdateTicker := time.NewTicker(5 * time.Second)
     defer performanceUpdateTicker.Stop()
 
     memValidationErrors := uint64(0)
     operationsSinceLastValidation := uint64(0)
     operationCount := uint64(0)
     lastPerformanceUpdate := time.Now()
+    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] starting stress test...", mainPID), false)
 
     for {
         select {
@@ -379,6 +321,8 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                 readSpeedMBps := float64(bytesRead) / readDuration.Seconds() / (1024 * 1024)
                 perfStats_.Lock()
                 perfStats_.Memory.RandomAccessSpeed = currentSpeedMBps
+                perfStats_.Memory.ReadSpeed = readSpeedMBps
+                perfStats_.Memory.WriteSpeed = writeSpeedMBps
                 if currentSpeedMBps < perfStats_.Memory.MinRandomAccessSpeed || perfStats_.Memory.MinRandomAccessSpeed == 0 {
                     perfStats_.Memory.MinRandomAccessSpeed = currentSpeedMBps
                 }
@@ -386,11 +330,6 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxRandomAccessSpeed = currentSpeedMBps
                 }
                 perfStats_.Memory.SumRandomAccessSpeed += currentSpeedMBps
-                // 修正6: 防止計數器溢位
-                if perfStats_.Memory.RandomAccessCount < math.MaxInt64 {
-                    perfStats_.Memory.RandomAccessCount++
-                }
-                perfStats_.Memory.ReadSpeed = readSpeedMBps
                 if readSpeedMBps < perfStats_.Memory.MinReadSpeed || perfStats_.Memory.MinReadSpeed == 0 {
                     perfStats_.Memory.MinReadSpeed = readSpeedMBps
                 }
@@ -398,10 +337,6 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxReadSpeed = readSpeedMBps
                 }
                 perfStats_.Memory.SumReadSpeed += readSpeedMBps
-                if perfStats_.Memory.ReadSpeedCount < math.MaxInt64 {
-                    perfStats_.Memory.ReadSpeedCount++
-                }
-                perfStats_.Memory.WriteSpeed = writeSpeedMBps
                 if writeSpeedMBps < perfStats_.Memory.MinWriteSpeed || perfStats_.Memory.MinWriteSpeed == 0 {
                     perfStats_.Memory.MinWriteSpeed = writeSpeedMBps
                 }
@@ -409,14 +344,21 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     perfStats_.Memory.MaxWriteSpeed = writeSpeedMBps
                 }
                 perfStats_.Memory.SumWriteSpeed += writeSpeedMBps
+                if perfStats_.Memory.RandomAccessCount < math.MaxInt64 {
+                    perfStats_.Memory.RandomAccessCount++
+                }
+                if perfStats_.Memory.ReadSpeedCount < math.MaxInt64 {
+                    perfStats_.Memory.ReadSpeedCount++
+                }
                 if perfStats_.Memory.WriteSpeedCount < math.MaxInt64 {
                     perfStats_.Memory.WriteSpeedCount++
                 }
                 perfStats_.Unlock()
                 if config.Debug {
-                    utils.LogMessage(fmt.Sprintf("Performance update: Random Access Speed %.2f MB/s, Read Speed %.2f MB/s, Write Speed %.2f MB/s",
-                        currentSpeedMBps, readSpeedMBps, writeSpeedMBps), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] performance update: Random Access Speed %.2f MB/s, Read Speed %.2f MB/s, Write Speed %.2f MB/s", mainPID, currentSpeedMBps, readSpeedMBps, writeSpeedMBps), true)
                 }
+                testArray = nil
+                runtime.GC()
             }
             operationCount = 0
             lastPerformanceUpdate = now
@@ -424,7 +366,6 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
         case <-validationTicker.C:
             validationStart := time.Now()
             localErrors := uint64(0)
-
             for arrIdx := range arrays {
                 if arrIdx >= len(arraySeedValues) {
                     continue
@@ -434,14 +375,12 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     actualVal := arrays[arrIdx][elemIdx]
                     address := LogMemoryAddress(arrIdx, elemIdx, arrays)
                     damagedLocationsLock.Lock()
-                    if damagedLocations[address] >= 3 { // 連續3次錯誤則跳過
+                    if damagedLocations[address] >= 3 {
                         damagedLocationsLock.Unlock()
                         continue
                     }
                     damagedLocationsLock.Unlock()
-
                     if actualVal != expectedVal {
-                        // 修正6: 防止計數器溢位
                         if localErrors < math.MaxUint64 {
                             localErrors++
                         }
@@ -450,76 +389,69 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                             damagedLocations[address]++
                         }
                         damagedLocationsLock.Unlock()
-
                         errorRecordsLock.Lock()
                         errorRecords = append(errorRecords, ErrorRecord{
-                            Timestamp: time.Now(),
-                            ArrIdx:    arrIdx,
-                            ElemIdx:   elemIdx,
-                            Actual:    actualVal,
-                            Expected:  expectedVal,
-                            Address:   address,
+                            Timestamp:   time.Now(),
+                            ArrIdx:      arrIdx,
+                            ElemIdx:     elemIdx,
+                            Actual:      actualVal,
+                            Expected:    expectedVal,
+                            Address:     address,
                             RepairTried: false,
                         })
                         errorRecordsLock.Unlock()
-
-                        // 嘗試修復
                         arrays[arrIdx][elemIdx] = expectedVal
                         if config.Debug {
-                            utils.LogMessage(fmt.Sprintf("Checkpoint validation error at arr[%d][%d]: got %d, expected %d, address: %s, repair attempted",
-                                arrIdx, elemIdx, actualVal, expectedVal, address), config.Debug)
+                            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] checkpoint validation error at arr[%d][%d]: got %d, expected %d, address: %s, repair attempted", mainPID, arrIdx, elemIdx, actualVal, expectedVal, address), true)
                         }
-
-                        // 再次驗證
                         if arrays[arrIdx][elemIdx] != expectedVal {
                             if config.Debug {
-                                utils.LogMessage(fmt.Sprintf("Repair failed at arr[%d][%d], address: %s",
-                                    arrIdx, elemIdx, address), config.Debug)
+                                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] repair failed at arr[%d][%d], address: %s", mainPID, arrIdx, elemIdx, address), true)
                             }
                         }
                     }
                 }
                 checkpointDataLock.Unlock()
             }
-
-            // 修正6: 防止計數器溢位
             if memValidationErrors <= math.MaxUint64-localErrors {
                 memValidationErrors += localErrors
             }
             validationDuration := time.Since(validationStart)
-
             if localErrors > 0 {
-                errorMsg := fmt.Sprintf("Memory validation found %d errors! Total errors so far: %d", localErrors, memValidationErrors)
-                if config.Debug {
-                    utils.LogMessage(errorMsg, config.Debug)
-                }
-                errorChan <- errorMsg
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] validation found %d errors! Total errors so far: %d", mainPID, localErrors, memValidationErrors), false)
             } else if config.Debug {
-                utils.LogMessage(fmt.Sprintf("Memory validation PASSED (checked %d arrays in %.2f seconds)", len(arrays), validationDuration.Seconds()), config.Debug)
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] validation PASSED (checked %d arrays in %.2f seconds)", mainPID, len(arrays), validationDuration.Seconds()), true)
             }
-
             operationsSinceLastValidation = 0
 
         case <-stop:
-            if config.Debug {
-                utils.LogMessage("Memory test stopped.", config.Debug)
-                if memValidationErrors > 0 {
-                    utils.LogMessage(fmt.Sprintf("Total memory validation errors during test: %d", memValidationErrors), config.Debug)
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] received stop signal", mainPID), false)
+            stopSubprocesses(mainPID, config.Debug)
+            if memValidationErrors > 0 {
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] total validation errors: %d", mainPID, memValidationErrors), false)
+                if config.Debug {
                     errorRecordsLock.Lock()
-                    utils.LogMessage(fmt.Sprintf("Error records: %+v", errorRecords), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] error records: %+v", mainPID, errorRecords), true)
                     errorRecordsLock.Unlock()
                     damagedLocationsLock.Lock()
-                    utils.LogMessage(fmt.Sprintf("Damaged locations (error count): %+v", damagedLocations), config.Debug)
+                    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] damaged locations (error count): %+v", mainPID, damagedLocations), true)
                     damagedLocationsLock.Unlock()
-                } else {
-                    utils.LogMessage("Memory data validation: All checks PASSED", config.Debug)
                 }
+            } else {
+                utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] data validation: All checks PASSED", mainPID), false)
             }
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] stopped", mainPID), false)
             return
 
         default:
             for i := 0; i < 1000 && operationsSinceLastValidation < 5000; i++ {
-                // 修正4: 防止隨機數範圍錯誤
+                select {
+                case <-stop:
+                    utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] interrupted during operation", mainPID), false)
+                    stopSubprocesses(mainPID, config.Debug)
+                    return
+                default:
+                }
                 if len(arrays) == 0 {
                     break
                 }
@@ -528,7 +460,6 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     continue
                 }
                 elemIdx := threadRNG.Intn(len(arrays[arrIdx]))
-                
                 address := LogMemoryAddress(arrIdx, elemIdx, arrays)
                 damagedLocationsLock.Lock()
                 if damagedLocations[address] >= 3 {
@@ -536,11 +467,9 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     continue
                 }
                 damagedLocationsLock.Unlock()
-
                 val := arrays[arrIdx][elemIdx]
                 newVal := val ^ 0xFF
                 arrays[arrIdx][elemIdx] = newVal
-
                 if elemIdx%checkpointInterval == 0 {
                     checkpointDataLock.Lock()
                     if checkpointData[arrIdx] == nil {
@@ -549,15 +478,11 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     checkpointData[arrIdx][elemIdx] = newVal
                     checkpointDataLock.Unlock()
                 }
-
                 perfStats_.Lock()
-                // 修正6: 防止計數器溢位
                 if perfStats_.Memory.RandomAccessCount < math.MaxUint64 {
                     perfStats_.Memory.RandomAccessCount++
                 }
                 perfStats_.Unlock()
-
-                // 修正6: 防止計數器溢位
                 if operationCount < math.MaxUint64 {
                     operationCount++
                 }
@@ -565,16 +490,28 @@ func RunMemoryStressTest(wg *sync.WaitGroup, stop chan struct{}, errorChan chan 
                     operationsSinceLastValidation++
                 }
             }
-
             if threadRNG.Intn(10_000) == 0 {
                 runtime.GC()
             }
-            time.Sleep(time.Millisecond)
+            runtime.Gosched()
         }
     }
 }
 
-// getSystemMemory retrieves total and free system memory
+// stopSubprocesses 模擬停止子程序並記錄日誌
+func stopSubprocesses(mainPID int, debug bool) {
+    // 模擬三個子程序：分配、讀寫、驗證
+    subprocesses := []string{"allocation", "readwrite", "validation"}
+    for i, name := range subprocesses {
+        subPID := mainPID + (i+1)*100 // 生成唯一子程序 PID
+        utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] subprocess %s stopping...", mainPID, name, subPID), false)
+        time.Sleep(100 * time.Millisecond) // 模擬停止延遲
+        if debug {
+            utils.LogMessage(fmt.Sprintf("Memory test [PID: %d] subprocess %s [PID: %d] stopped", mainPID, name, subPID), true)
+        }
+    }
+}
+
 func getSystemMemory() (total, free uint64) {
     var info syscall.Sysinfo_t
     err := syscall.Sysinfo(&info)

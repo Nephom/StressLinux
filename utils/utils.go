@@ -16,44 +16,44 @@ import (
 	"unsafe"
 )
 
-// Logger function to handle both console output and file logging
-func LogMessage(message string, debug bool) error {
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	logEntry := fmt.Sprintf("%s | %s", timestamp, message)
+// LogMessage handles both console output and file logging
+func LogMessage(message string, debug bool) {
+    timestamp := time.Now().Format("2006-01-02 15:04:05")
+    logEntry := fmt.Sprintf("%s | %s", timestamp, message)
 
-	// Check if stress.log already exists
-	fileInfo, err := os.Stat("stress.log")
-	var creationTime string
+    // Check if stress.log already exists
+    fileInfo, err := os.Stat("stress.log")
+    var creationTime string
 
-	if os.IsNotExist(err) {
-		creationTime = timestamp
-		f, err := os.Create("stress.log")
-		if err != nil {
-			return fmt.Errorf("failed to create stress.log: %v", err)
-		}
-		defer f.Close()
-		_, err = f.WriteString(fmt.Sprintf("Log file created at: %s\n", creationTime))
-		if err != nil {
-			return fmt.Errorf("failed to write creation time: %v", err)
-		}
-	} else {
-		creationTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
-	}
+    if os.IsNotExist(err) {
+        creationTime = timestamp
+        f, err := os.Create("stress.log")
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to create stress.log: %v\n", err)
+            return
+        }
+        defer f.Close()
+        if _, err := f.WriteString(fmt.Sprintf("Log file created at: %s\n", creationTime)); err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to write creation time: %v\n", err)
+        }
+    } else {
+        creationTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
+    }
 
-	f, err := os.OpenFile("stress.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open stress.log: %v", err)
-	}
-	defer f.Close()
+    f, err := os.OpenFile("stress.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to open stress.log: %v\n", err)
+        return
+    }
+    defer f.Close()
 
-	logger := log.New(f, "", 0)
-	logger.Println(logEntry)
+    logger := log.New(f, "", 0)
+    logger.Println(logEntry)
 
-	if debug {
-		fmt.Println(logEntry)
-	}
-
-	return nil
+    // Output to console for critical messages (debug == false) or when debug is enabled
+    if !debug {
+        fmt.Println(logEntry)
+    }
 }
 
 // FormatSize converts bytes to human-readable string (KB, MB, GB)
@@ -75,6 +75,20 @@ func FormatSize(size int64) string {
 	}
 
 	return fmt.Sprintf("%dB", size)
+}
+
+// 在 utils 模組中假設新增的函數
+func FormatCount(count uint64) string {
+    switch {
+    case count >= 1_000_000_000:
+        return fmt.Sprintf("%.2fG", float64(count)/1_000_000_000)
+    case count >= 1_000_000:
+        return fmt.Sprintf("%.2fM", float64(count)/1_000_000)
+    case count >= 1_000:
+        return fmt.Sprintf("%.2fK", float64(count)/1_000)
+    default:
+        return fmt.Sprintf("%d", count)
+    }
 }
 
 // ParseSize parses size string with units (e.g., 4K, 64K, 1G)

@@ -5,20 +5,28 @@ import (
     "crypto/aes"
     "crypto/cipher"
     "crypto/ecdsa"
+    "crypto/ed25519"
     "crypto/elliptic"
     "crypto/rand"
     "crypto/rsa"
     "crypto/sha256"
+    "crypto/sha512"
+    "bytes"
     "fmt"
     "math"
+    "os"
     "runtime"
     "stress/config"
     "stress/utils"
     "sync"
+	"sync/atomic"
     "time"
     "strings"
 
     "golang.org/x/sys/unix"
+    "golang.org/x/crypto/blake2b"
+    "golang.org/x/crypto/chacha20poly1305"
+    "golang.org/x/crypto/pbkdf2"
 )
 
 // adjustBatchSize adjusts the batch size based on the load level
@@ -41,39 +49,51 @@ func adjustBatchSize(baseBatchSize int, loadLevel string) int {
     return adjusted
 }
 
+// adjustCycleDuration adjusts the cycle duration based on the load level
+func adjustCycleDuration(loadLevel string) time.Duration {
+    baseDuration := 50 * time.Millisecond
+    switch strings.ToLower(loadLevel) {
+    case "high", "2":
+        return baseDuration * 2
+    case "low", "1":
+        return baseDuration / 2
+    case "default", "0", "":
+        return baseDuration
+    default:
+        utils.LogMessage(fmt.Sprintf("Invalid CPU load level: %s, using Default cycle duration", loadLevel), true)
+        return baseDuration
+    }
+}
+
 // RunCPUStressTests runs CPU stress tests across specified cores
 func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan string, testConfig CPUConfig, perfStats *config.PerformanceStats) {
     defer wg.Done()
+
+    // Use actual process ID
+    pid := os.Getpid()
+    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] started on %d cores", pid, testConfig.NumCores), false)
 
     // Set GOMAXPROCS to limit maximum parallelism
     if testConfig.NumCores > 0 {
         oldGOMAXPROCS := runtime.GOMAXPROCS(testConfig.NumCores)
         if testConfig.Debug {
-            utils.LogMessage(fmt.Sprintf("Set GOMAXPROCS to %d (was %d)", testConfig.NumCores, oldGOMAXPROCS), testConfig.Debug)
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] set GOMAXPROCS to %d (was %d)", pid, testConfig.NumCores, oldGOMAXPROCS), true)
         }
     }
 
     // Get cache information
     cacheInfo, err := utils.GetCacheInfo()
     if err != nil {
-        utils.LogMessage(fmt.Sprintf("Failed to get cache info: %v, using defaults", err), testConfig.Debug)
-    }
-
-    if testConfig.Debug {
-        utils.LogMessage(fmt.Sprintf("L1 Cache Size: %.2f KB", float64(cacheInfo.L1Size)/1024), testConfig.Debug)
-        utils.LogMessage(fmt.Sprintf("L2 Cache Size: %.2f KB", float64(cacheInfo.L2Size)/1024), testConfig.Debug)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] failed to get cache info: %v, using defaults", pid, err), false)
+    } else if testConfig.Debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] L1 Cache Size: %.2f KB", pid, float64(cacheInfo.L1Size)/1024), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] L2 Cache Size: %.2f KB", pid, float64(cacheInfo.L2Size)/1024), true)
         if cacheInfo.L3Size > 0 {
-            utils.LogMessage(fmt.Sprintf("L3 Cache Size: %.2f MB", float64(cacheInfo.L3Size)/(1024*1024)), testConfig.Debug)
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] L3 Cache Size: %.2f MB", pid, float64(cacheInfo.L3Size)/(1024*1024)), true)
         } else {
-            utils.LogMessage("L3 Cache: Not present", testConfig.Debug)
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] L3 Cache: Not present", pid), true)
         }
     }
-
-    // Initialize performance stats maps once
-    perfStats.Lock()
-    initPerfStatsMaps(perfStats)
-    perfStats.CPU.CacheInfo = cacheInfo
-    perfStats.Unlock()
 
     // Determine the list of CPU cores to use
     allCPUs := testConfig.CPUList
@@ -87,86 +107,44 @@ func RunCPUStressTests(wg *sync.WaitGroup, stop chan struct{}, errorChan chan st
     if testConfig.NumCores > len(allCPUs) {
         testConfig.NumCores = len(allCPUs)
         if testConfig.Debug {
-            utils.LogMessage(fmt.Sprintf("Adjusted NumCores to %d to match CPU list length", testConfig.NumCores), testConfig.Debug)
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] adjusted NumCores to %d to match CPU list length", pid, testConfig.NumCores), true)
         }
     } else if testConfig.NumCores > 0 {
         allCPUs = allCPUs[:testConfig.NumCores]
     }
 
-    perfStats.Lock()
-    perfStats.CPU.NumCores = len(allCPUs)
-    perfStats.Unlock()
-
-    if testConfig.Debug {
-        utils.LogMessage(fmt.Sprintf("Running CPU tests on %d cores (CPUs: %v)", len(allCPUs), allCPUs), testConfig.Debug)
-    }
+    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] running on %d cores (CPUs: %v)", pid, len(allCPUs), allCPUs), false)
 
     var innerWg sync.WaitGroup
     innerWg.Add(len(allCPUs))
     for _, cpuID := range allCPUs {
         go func(id int) {
             defer innerWg.Done()
-            runAllTestsPerCore(stop, errorChan, id, perfStats, testConfig.Debug, testConfig.LoadLevel)
+            runAllTestsPerCore(pid, stop, errorChan, id, perfStats, testConfig.Debug, testConfig.LoadLevel)
         }(cpuID)
     }
     innerWg.Wait()
 
-    // Aggregate total GFLOPS
-    perfStats.Lock()
-    totalGFLOPS := 0.0
-    for _, cpuID := range allCPUs {
-        totalGFLOPS += perfStats.CPU.CoreGFLOPS[cpuID]
-    }
-    perfStats.CPU.GFLOPS = totalGFLOPS
-    perfStats.Unlock()
-
-    // Suggest garbage collection
+    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] completed", pid), false)
     runtime.GC()
 }
 
-// initPerfStatsMaps initializes all performance stats maps
-func initPerfStatsMaps(perfStats *config.PerformanceStats) {
-    if perfStats.CPU.CoreGFLOPS == nil {
-        perfStats.CPU.CoreGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.IntegerGFLOPS == nil {
-        perfStats.CPU.IntegerGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.FloatGFLOPS == nil {
-        perfStats.CPU.FloatGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.VectorGFLOPS == nil {
-        perfStats.CPU.VectorGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.CacheGFLOPS == nil {
-        perfStats.CPU.CacheGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.BranchGFLOPS == nil {
-        perfStats.CPU.BranchGFLOPS = make(map[int]float64)
-    }
-    if perfStats.CPU.CryptoGFLOPS == nil {
-        perfStats.CPU.CryptoGFLOPS = make(map[int]float64)
-    }
-}
-
-// getTestNames returns test names and weights
+// getTestNames returns test names
 func getTestNames(tests []struct {
     name   string
-    fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+    fn     func(int, <-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
     weight float64
 }) []string {
     names := make([]string, len(tests))
     for i, test := range tests {
-        names[i] = fmt.Sprintf("%s(%.2f)", test.name, test.weight)
+        names[i] = test.name
     }
     return names
 }
 
 // runAllTestsPerCore runs all test types sequentially in one goroutine per core
-func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
-    if debug {
-        utils.LogMessage(fmt.Sprintf("Starting stress worker on CPU %d", cpuID), debug)
-    }
+func runAllTestsPerCore(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string) {
+    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] starting stress worker on CPU %d", mainPID, cpuID), false)
 
     runtime.LockOSThread()
     defer runtime.UnlockOSThread()
@@ -175,24 +153,23 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
     cpuset.Set(cpuID)
     err := unix.SchedSetaffinity(0, &cpuset)
     if err != nil {
-        utils.LogMessage(fmt.Sprintf("Failed to set CPU affinity for CPU %d: %v (may require root privileges)", cpuID, err), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] failed to set CPU affinity for CPU %d: %v", mainPID, cpuID, err), false)
     } else if debug {
-        utils.LogMessage(fmt.Sprintf("Successfully set CPU affinity for CPU %d", cpuID), debug)
-    }
-
-    if debug {
-        var actualSet unix.CPUSet
-        err := unix.SchedGetaffinity(0, &actualSet)
-        if err != nil {
-            utils.LogMessage(fmt.Sprintf("Failed to get CPU affinity for CPU %d: %v", cpuID, err), debug)
-        } else {
-            utils.LogMessage(fmt.Sprintf("Actual CPU affinity for CPU %d: %v", cpuID, actualSet), debug)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] successfully set CPU affinity for CPU %d", mainPID, cpuID), true)
+        if debug {
+            var actualSet unix.CPUSet
+            err := unix.SchedGetaffinity(0, &actualSet)
+            if err != nil {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] failed to get CPU affinity for CPU %d: %v", mainPID, cpuID, err), true)
+            } else {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] actual CPU affinity for CPU %d: %v", mainPID, cpuID, actualSet), true)
+            }
         }
     }
 
-    // Define all available tests and their reference weights
+    // Define all available tests
     allTests := map[string]struct {
-        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+        fn     func(int, <-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
         weight float64
     }{
         "integer": {runIntegerComputationParallel, 0.2},
@@ -206,28 +183,29 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
     // Define test configurations for each load level
     type testConfig struct {
         name   string
-        weight float64
+        weight float64 // Only used for non-high load levels
+        interval time.Duration // Interval after each test
     }
 
     loadLevelConfigs := map[string][]testConfig{
         "high": {
-            {"integer", 0.1},
-            {"float", 0.2},
-            {"vector", 0.2},
-            {"cache", 0.2},
-            {"branch", 0.15},
-            {"crypto", 0.15},
-        },
-        "low": {
-            {"integer", 0.2},
-            {"float", 0.3},
+            {"integer", 0.0, 0},
+            {"float", 0.0, 0},
+            {"vector", 0.0, 0},
+            {"cache", 0.0, 0},
+            {"branch", 0.0, 0},
+            {"crypto", 0.0, 0},
         },
         "default": {
-            {"float", 0.2},
-            {"vector", 0.2},
-            {"cache", 0.2},
-            {"branch", 0.2},
-            {"crypto", 0.2},
+            {"float", 0.2, 50 * time.Millisecond},
+            {"vector", 0.2, 50 * time.Millisecond},
+            {"cache", 0.2, 50 * time.Millisecond},
+            {"branch", 0.2, 50 * time.Millisecond},
+            {"crypto", 0.2, 50 * time.Millisecond},
+        },
+        "low": {
+            {"integer", 0.5, 100 * time.Millisecond},
+            {"float", 0.5, 100 * time.Millisecond},
         },
     }
 
@@ -241,91 +219,126 @@ func runAllTestsPerCore(stop <-chan struct{}, errorChan chan<- string, cpuID int
     case "default", "0", "":
         configKey = "default"
     default:
-        utils.LogMessage(fmt.Sprintf("Invalid CPU load level: %s, using Default", loadLevel), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] invalid CPU load level: %s, using Default", mainPID, loadLevel), false)
         configKey = "default"
     }
 
     tests, exists := loadLevelConfigs[configKey]
     if !exists {
-        utils.LogMessage(fmt.Sprintf("No config for load level %s, using Default", configKey), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] no config for load level %s, using Default", mainPID, configKey), false)
         tests = loadLevelConfigs["default"]
     }
 
     var selectedTests []struct {
         name   string
-        fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+        fn     func(int, <-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
         weight float64
+        interval time.Duration
     }
 
     totalWeight := 0.0
     for _, test := range tests {
-        totalWeight += test.weight
+        if configKey != "high" {
+            totalWeight += test.weight
+        }
     }
-
-    normalize := configKey == "high" && totalWeight != 0 && totalWeight != 1.0
 
     for _, test := range tests {
         testFn, ok := allTests[test.name]
         if !ok {
-            utils.LogMessage(fmt.Sprintf("Test %s not found in allTests, skipping", test.name), true)
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] test %s not found, skipping", mainPID, test.name), false)
             continue
         }
         weight := test.weight
-        if normalize {
-            weight = test.weight / totalWeight
+        if configKey == "high" {
+            weight = 0.0 // No weight for high load
         }
         selectedTests = append(selectedTests, struct {
             name   string
-            fn     func(<-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
+            fn     func(int, <-chan struct{}, chan<- string, int, *config.PerformanceStats, bool, string, time.Duration)
             weight float64
-        }{test.name, testFn.fn, weight})
+            interval time.Duration
+        }{test.name, testFn.fn, weight, test.interval})
     }
 
     if len(selectedTests) == 0 {
-        utils.LogMessage(fmt.Sprintf("No valid tests selected for CPU %d, exiting", cpuID), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] no valid tests selected for CPU %d, exiting", mainPID, cpuID), false)
         return
     }
 
-    cycleDuration := 50 * time.Millisecond
+    cycleDuration := adjustCycleDuration(loadLevel)
     if debug {
-        usedTime := time.Duration(float64(cycleDuration) * totalWeight)
-        if normalize {
-            usedTime = cycleDuration
+        testNames := make([]string, len(selectedTests))
+        for i, test := range selectedTests {
+            testNames[i] = test.name
         }
-        utils.LogMessage(fmt.Sprintf("CPU %d: Load level %s, running %d tests: %v, expected cycle time: %v", cpuID, configKey, len(selectedTests), getTestNames(selectedTests), usedTime), debug)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d: Load level %s, running %d tests: %v, expected cycle time: %v",
+            mainPID, cpuID, configKey, len(selectedTests), testNames, cycleDuration), true)
     }
 
+    // Main test execution loop
     for {
         select {
         case <-stop:
-            if debug {
-                utils.LogMessage(fmt.Sprintf("Stress tests on CPU %d completed", cpuID), debug)
-            }
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] received stop signal for CPU %d", mainPID, cpuID), false)
+            stopSubprocesses(mainPID, cpuID, debug)
             return
         default:
             start := time.Now()
-            for _, test := range selectedTests {
-                testBudget := time.Duration(float64(cycleDuration) * test.weight)
-                test.fn(stop, errorChan, cpuID, perfStats, debug, loadLevel, testBudget)
-            }
-            if configKey != "high" && totalWeight < 1.0 {
-                idleTime := time.Duration(float64(cycleDuration) * (1.0 - totalWeight))
-                time.Sleep(idleTime)
+            for i, test := range selectedTests {
+                select {
+                case <-stop:
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] interrupted for CPU %d", mainPID, cpuID), false)
+                    stopSubprocesses(mainPID, cpuID, debug)
+                    return
+                default:
+                    // Calculate test duration
+                    testDuration := 100 * time.Millisecond // Fixed base duration
+                    if configKey != "high" {
+                        testDuration = time.Duration(float64(cycleDuration) * test.weight)
+                    }
+                    // Execute test
+                    test.fn(mainPID, stop, errorChan, cpuID, perfStats, debug, loadLevel, testDuration)
+                    // Add interval (except for last test in cycle or high load)
+                    if test.interval > 0 && (i < len(selectedTests)-1 || configKey != "high") {
+                        select {
+                        case <-stop:
+                            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] interrupted during interval for CPU %d", mainPID, cpuID), false)
+                            stopSubprocesses(mainPID, cpuID, debug)
+                            return
+                        case <-time.After(test.interval):
+                            if debug {
+                                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d: Applied interval of %v after test %s",
+                                    mainPID, cpuID, test.interval, test.name), true)
+                            }
+                        }
+                    }
+                }
             }
             if debug {
-                utils.LogMessage(fmt.Sprintf("CPU %d: Actual cycle time: %v", cpuID, time.Since(start)), debug)
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d: Actual cycle time: %v", mainPID, cpuID, time.Since(start)), true)
             }
-            // Suggest garbage collection
             runtime.GC()
         }
     }
 }
 
+func stopSubprocesses(mainPID, cpuID int, debug bool) {
+    subprocesses := []string{"integer", "float", "vector", "cache", "branch", "crypto"}
+    for i, name := range subprocesses {
+        subPID := mainPID + (i+1)*100
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] subprocess %s [PID: %d] stopping on CPU %d...", mainPID, name, subPID, cpuID), false)
+        time.Sleep(100 * time.Millisecond)
+        if debug {
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] subprocess %s [PID: %d] stopped on CPU %d", mainPID, name, subPID, cpuID), true)
+        }
+    }
+}
+
 // runIntegerComputationParallel performs intensive integer operations
-func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+func runIntegerComputationParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
-
     baseBatchSize := 1000000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     primes := []int{2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53}
@@ -336,6 +349,12 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
     for time.Since(startTime) < duration {
         select {
         case <-stop:
+            perfStats.Lock()
+            perfStats.CPU.IntegerCount += operationCount
+            perfStats.Unlock()
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] integer test stopped on CPU %d", mainPID, cpuID), true)
+            }
             return
         default:
             for i := 0; i < batchSize; i++ {
@@ -345,10 +364,14 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
                     result = result ^ (result >> 3)
                     result = result + int64(prime)
                 }
-                if i == 0 && operationCount == 0 {
+                if i == 0 {
                     expectedResult = result
                 } else if !errorDetected && result != expectedResult {
-                    errorChan <- fmt.Sprintf("Integer computation error on CPU %d: Expected %d, got %d", cpuID, expectedResult, result)
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] integer computation error on CPU %d", mainPID, cpuID), false)
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] integer computation error on CPU %d: Expected %d, got %d", mainPID, cpuID, expectedResult, result), true)
+                    }
+                    errorChan <- fmt.Sprintf("Integer computation error on CPU %d", cpuID)
                     errorDetected = true
                 }
                 operationCount++
@@ -356,30 +379,19 @@ func runIntegerComputationParallel(stop <-chan struct{}, errorChan chan<- string
         }
     }
 
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        const opsPerFlop = 8
-        gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
+    perfStats.Lock()
+    perfStats.CPU.IntegerCount += operationCount
+    perfStats.Unlock()
 
-        perfStats.Lock()
-        perfStats.CPU.IntegerOPS = (perfStats.CPU.IntegerOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.IntegerGFLOPS[cpuID] = (perfStats.CPU.IntegerGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.IntegerCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d integer perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
-        }
+    if debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d integer operations: %d", mainPID, cpuID, operationCount), true)
     }
 }
 
 // runFloatComputationParallel performs intensive floating-point operations
-func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+func runFloatComputationParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
-
     baseBatchSize := 500000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
     constants := []float64{3.14159, 2.71828, 1.41421, 1.73205, 2.23606, 2.44949, 2.64575}
@@ -391,6 +403,12 @@ func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, 
     for time.Since(startTime) < duration {
         select {
         case <-stop:
+            perfStats.Lock()
+            perfStats.CPU.FloatCount += operationCount
+            perfStats.Unlock()
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] float test stopped on CPU %d", mainPID, cpuID), true)
+            }
             return
         default:
             for i := 0; i < batchSize; i++ {
@@ -400,10 +418,14 @@ func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, 
                     result = math.Sqrt(math.Abs(result)) + math.Log(1 + math.Abs(result))
                     result = math.Pow(result, 0.5) * c
                 }
-                if i == 0 && operationCount == 0 {
+                if i == 0 {
                     expectedResult = result
                 } else if !errorDetected && math.Abs(result-expectedResult) > epsilon {
-                    errorChan <- fmt.Sprintf("Float computation error on CPU %d: Expected %.10f, got %.10f", cpuID, expectedResult, result)
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] float computation error on CPU %d", mainPID, cpuID), false)
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] float computation error on CPU %d: Expected %.10f, got %.10f", mainPID, cpuID, expectedResult, result), true)
+                    }
+                    errorChan <- fmt.Sprintf("Float computation error on CPU %d", cpuID)
                     errorDetected = true
                 }
                 operationCount++
@@ -411,30 +433,19 @@ func runFloatComputationParallel(stop <-chan struct{}, errorChan chan<- string, 
         }
     }
 
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        const flopsPerOp = 12
-        gflops := (opsPerSecond * flopsPerOp) / 1e9
+    perfStats.Lock()
+    perfStats.CPU.FloatCount += operationCount
+    perfStats.Unlock()
 
-        perfStats.Lock()
-        perfStats.CPU.FloatOPS = (perfStats.CPU.FloatOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.FloatGFLOPS[cpuID] = (perfStats.CPU.FloatGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.FloatCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d float perf: %.2f GFLOPS, operations: %d", cpuID, gflops, operationCount), debug)
-        }
+    if debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d float operations: %d", mainPID, cpuID, operationCount), true)
     }
 }
 
 // runVectorComputationParallel performs SIMD-like vector operations
-func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+func runVectorComputationParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
-
     const vectorSize = 1024
     baseBatchSize := 10000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
@@ -455,6 +466,12 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
     for time.Since(startTime) < duration {
         select {
         case <-stop:
+            perfStats.Lock()
+            perfStats.CPU.VectorCount += operationCount
+            perfStats.Unlock()
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] vector test stopped on CPU %d", mainPID, cpuID), true)
+            }
             return
         default:
             for b := 0; b < batchSize; b++ {
@@ -466,10 +483,14 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
                     dotProduct += vecA[i] * vecB[i]
                 }
                 checksum := dotProduct
-                if b == 0 && operationCount == 0 {
+                if b == 0 {
                     expectedChecksum = checksum
                 } else if !errorDetected && math.Abs(checksum-expectedChecksum) > epsilon {
-                    errorChan <- fmt.Sprintf("Vector computation error on CPU %d: Expected checksum %.10f, got %.10f", cpuID, expectedChecksum, checksum)
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] vector computation error on CPU %d", mainPID, cpuID), false)
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] vector computation error on CPU %d: Expected checksum %.10f, got %.10f", mainPID, cpuID, expectedChecksum, checksum), true)
+                    }
+                    errorChan <- fmt.Sprintf("Vector computation error on CPU %d", cpuID)
                     errorDetected = true
                 }
                 operationCount++
@@ -477,36 +498,25 @@ func runVectorComputationParallel(stop <-chan struct{}, errorChan chan<- string,
         }
     }
 
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        flopsPerVectorOp := float64(vectorSize * 5)
-        gflops := (opsPerSecond * flopsPerVectorOp) / 1e9
+    perfStats.Lock()
+    perfStats.CPU.VectorCount += operationCount
+    perfStats.Unlock()
 
-        perfStats.Lock()
-        perfStats.CPU.VectorOPS = (perfStats.CPU.VectorOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.VectorGFLOPS[cpuID] = (perfStats.CPU.VectorGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflops) / 2
-        perfStats.CPU.VectorCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d vector perf: %.2f GFLOPS, operations: %d", cpuID, gflops, operationCount), debug)
-        }
+    if debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d vector operations: %d", mainPID, cpuID, operationCount), true)
     }
 }
 
 // runCacheStressParallel performs cache stress testing
-func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+func runCacheStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
-
     baseBatchSize := 1000000
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
-    sampleStart := time.Now()
-    perfStats.Lock()
-    cacheInfo := perfStats.CPU.CacheInfo
-    perfStats.Unlock()
+    cacheInfo, err := utils.GetCacheInfo()
+    if err != nil {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] failed to get cache info: %v, using defaults", mainPID, err), false)
+    }
 
     var targetCacheSize int64
     var targetCacheLevel string
@@ -526,7 +536,7 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
 
     if debug {
         sizeMB := float64(dataSizeBytes) / (1024 * 1024)
-        utils.LogMessage(fmt.Sprintf("Stressing %s Cache on CPU %d with array size: %.2f MB", targetCacheLevel, cpuID, sizeMB), debug)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] stressing %s Cache on CPU %d with array size: %.2f MB", mainPID, targetCacheLevel, cpuID, sizeMB), true)
     }
 
     data := make([]int64, arraySize)
@@ -554,7 +564,8 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
             data[idx] ^= sum
         }
     }
-    sampleElapsed := time.Since(sampleStart)
+
+    sampleElapsed := time.Since(startTime)
     if sampleElapsed > 0 {
         batchTime := sampleElapsed / 1000
         targetBatches := int(duration / batchTime)
@@ -572,6 +583,12 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
     for time.Since(startTime) < duration {
         select {
         case <-stop:
+            perfStats.Lock()
+            perfStats.CPU.CacheCount += operationCount
+            perfStats.Unlock()
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] cache test stopped on CPU %d", mainPID, cpuID), true)
+            }
             return
         default:
             for i := 0; i < batchSize; i++ {
@@ -595,193 +612,558 @@ func runCacheStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID
             if operationCount == uint64(batchSize) {
                 expectedSum = sum
             } else if !errorDetected && sum != expectedSum {
-                errorChan <- fmt.Sprintf("Cache stress error on CPU %d: Expected sum %d, got %d", cpuID, expectedSum, sum)
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] cache stress error on CPU %d", mainPID, cpuID), false)
+                if debug {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] cache stress error on CPU %d: Expected sum %d, got %d", mainPID, cpuID, expectedSum, sum), true)
+                }
+                errorChan <- fmt.Sprintf("Cache stress error on CPU %d", cpuID)
                 errorDetected = true
             }
         }
     }
 
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        const opsPerFlop = 2
-        gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
+    perfStats.Lock()
+    perfStats.CPU.CacheCount += operationCount
+    perfStats.Unlock()
 
-        perfStats.Lock()
-        perfStats.CPU.CacheOPS = (perfStats.CPU.CacheOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.CacheGFLOPS[cpuID] = (perfStats.CPU.CacheGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CacheCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d cache perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
-        }
+    if debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d cache operations: %d", mainPID, cpuID, operationCount), true)
     }
 }
 
 // runBranchPredictionParallel performs branch prediction stress testing
-func runBranchPredictionParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
-    startTime := time.Now()
-    operationCount := uint64(0)
-
-    baseBatchSize := 1000000
-    batchSize := adjustBatchSize(baseBatchSize, loadLevel)
-    rng := utils.NewRand(int64(cpuID))
-
-    for time.Since(startTime) < duration {
-        select {
-        case <-stop:
-            return
-        default:
-            for i := 0; i < batchSize; i++ {
-                x := rng.Intn(100)
-                var result int64
-                if x%7 == 0 {
-                    result += int64(x * x)
-                } else if x%5 == 0 {
-                    result += int64(x * 2)
-                } else if x%3 == 0 {
-                    result -= int64(x)
-                } else {
-                    result ^= int64(x)
-                }
-                _ = result
-            }
-            operationCount += uint64(batchSize)
-        }
-    }
-
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        const opsPerFlop = 4
-        gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
-
-        perfStats.Lock()
-        perfStats.CPU.BranchOPS = (perfStats.CPU.BranchOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.BranchGFLOPS[cpuID] = (perfStats.CPU.BranchGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.BranchCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d branch perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
-        }
-    }
+func NewSimpleRNG(seed int64) *SimpleRNG {
+	return &SimpleRNG{seed: uint64(seed)}
 }
 
-// runCryptoStressParallel performs cryptographic stress testing
-func runCryptoStressParallel(stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+func (r *SimpleRNG) Intn(n int) int {
+	r.seed = r.seed*1103515245 + 12345
+	return int(r.seed % uint64(n))
+}
+
+func runBranchPredictionParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			if debug {
+				errorMsg := fmt.Sprintf("CPU test [PID: %d] CRASH on CPU %d: %v", mainPID, cpuID, r)
+				utils.LogMessage(errorMsg, true)
+				select {
+				case errorChan <- errorMsg:
+				default:
+				}
+			}
+		}
+	}()
+
+	startTime := time.Now()
+	var operationCount uint64
+	baseBatchSize := 1000000
+	batchSize := adjustBatchSize(baseBatchSize, loadLevel)
+	
+	// 使用簡單的隨機數生成器或適配你的 utils.Rand
+	var rng RandomGenerator
+	if utilsRand := utils.NewRand(int64(cpuID)); utilsRand != nil {
+		// 如果 utils.Rand 實現了 Intn(int) int 方法，可以直接使用
+		if r, ok := interface{}(utilsRand).(RandomGenerator); ok {
+			rng = r
+		} else {
+			rng = NewSimpleRNG(int64(cpuID))
+		}
+	} else {
+		rng = NewSimpleRNG(int64(cpuID))
+	}
+	
+	// 增加驗證用的結果結構
+	var testResult BranchTestResult
+	var errorCount uint64
+	
+	// 更複雜的分支預測模式
+	patterns := []int{2, 3, 5, 7, 11, 13, 17, 19, 23, 29}
+	patternIndex := 0
+	
+	// 動態調整負載
+	lastCheckTime := startTime
+	performanceCounter := uint64(0)
+	
+	for time.Since(startTime) < duration {
+		select {
+		case <-stop:
+			updatePerfStats(perfStats, operationCount, &testResult, errorCount)
+			if debug && errorCount > 0 {
+				utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] branch test stopped on CPU %d with %d errors", mainPID, cpuID, errorCount), true)
+			}
+			return
+		default:
+			// 動態批次處理
+			currentBatch := batchSize
+			if time.Since(lastCheckTime) > 100*time.Millisecond {
+				// 根據系統負載動態調整
+				if loadLevel == "extreme" {
+					currentBatch = int(float64(batchSize) * (1.0 + 0.5*math.Sin(float64(time.Since(startTime).Nanoseconds())/1e9)))
+				}
+				lastCheckTime = time.Now()
+			}
+			
+			// 執行更複雜的分支預測測試
+			for i := 0; i < currentBatch; i++ {
+				x := rng.Intn(10000) // 增加隨機範圍
+				pattern := patterns[patternIndex%len(patterns)]
+				
+				// 驗證前的預期值
+				expectedResult := calculateExpectedResult(x, pattern)
+				
+				// 實際計算
+				actualResult, err := performComplexBranchOperation(x, pattern, &testResult)
+				
+				// 驗證結果
+				if err != nil {
+					atomic.AddUint64(&errorCount, 1)
+					if debug {
+						select {
+						case errorChan <- fmt.Sprintf("CPU test [PID: %d] CPU %d calculation error: %v", mainPID, cpuID, err):
+						default:
+						}
+					}
+				} else if actualResult != expectedResult {
+					atomic.AddUint64(&errorCount, 1)
+					if debug {
+						select {
+						case errorChan <- fmt.Sprintf("CPU test [PID: %d] CPU %d verification failed: expected %d, got %d", mainPID, cpuID, expectedResult, actualResult):
+						default:
+						}
+					}
+				}
+				
+				// 增加分支預測混亂度
+				if performanceCounter%1000 == 0 {
+					patternIndex = (patternIndex + rng.Intn(len(patterns))) % len(patterns)
+				}
+				
+				atomic.AddUint64(&operationCount, 1)
+				performanceCounter++
+				
+				// 防止過度佔用CPU，允許其他goroutine運行
+				if performanceCounter%10000 == 0 {
+					runtime.Gosched()
+				}
+			}
+			
+			// 額外的分支預測挑戰：不規則模式
+			if operationCount%50000 == 0 {
+				performIrregularBranchPattern(rng, &testResult, &operationCount)
+			}
+		}
+	}
+
+	updatePerfStats(perfStats, operationCount, &testResult, errorCount)
+	
+	if debug && errorCount > 0 {
+		utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d completed with %d operations and %d errors", mainPID, cpuID, operationCount, errorCount), true)
+	}
+}
+
+// 計算預期結果用於驗證
+func calculateExpectedResult(x, pattern int) int64 {
+	var result int64
+	
+	switch {
+	case x%pattern == 0:
+		if x > 0 {
+			result = int64(x * x)
+		} else {
+			result = int64(x)
+		}
+	case x%(pattern-1) == 0:
+		result = int64(x << 2) // 左移2位
+	case x%(pattern-2) == 0:
+		if pattern-2 > 0 {
+			result = int64(x / (pattern - 2))
+		} else {
+			result = int64(x)
+		}
+	case x%2 == 0:
+		result = int64(x ^ (x >> 1))
+	default:
+		result = int64((x * 3) + 1)
+	}
+	
+	return result
+}
+
+// 執行複雜的分支操作
+func performComplexBranchOperation(x, pattern int, testResult *BranchTestResult) (int64, error) {
+	var result int64
+	
+	// 防止除零錯誤
+	if pattern == 0 {
+		return 0, fmt.Errorf("pattern cannot be zero")
+	}
+	
+	switch {
+	case x%pattern == 0:
+		if x > 0 {
+			result = int64(x * x)
+			atomic.AddUint64(&testResult.MultiplyCount, 1)
+		} else {
+			result = int64(x)
+		}
+		atomic.AddInt64(&testResult.Sum, result)
+		
+	case x%(pattern-1) == 0:
+		result = int64(x << 2) // 左移2位相當於乘以4
+		atomic.AddUint64(&testResult.ShiftCount, 1)
+		atomic.AddInt64(&testResult.Sum, result)
+		
+	case x%(pattern-2) == 0:
+		if pattern-2 > 0 {
+			result = int64(x / (pattern - 2))
+			atomic.AddUint64(&testResult.DivideCount, 1)
+		} else {
+			result = int64(x)
+		}
+		atomic.AddInt64(&testResult.Sum, result)
+		
+	case x%2 == 0:
+		result = int64(x ^ (x >> 1))
+		atomic.AddInt64(&testResult.XorResult, result)
+		atomic.AddUint64(&testResult.ModuloCount, 1)
+		
+	default:
+		// 複雜的分支：產生不可預測的模式
+		if x > 5000 {
+			result = int64((x * 3) + 1)
+		} else if x > 1000 {
+			result = int64((x * 5) - 2)
+		} else if x > 100 {
+			result = int64(x * x / 10)
+			if x*x < 0 { // 溢出檢查
+				return 0, fmt.Errorf("integer overflow detected")
+			}
+		} else {
+			result = int64((x * 3) + 1)
+		}
+		atomic.AddInt64(&testResult.Sum, result)
+	}
+	
+	return result, nil
+}
+
+// 執行不規則分支模式以增加預測難度
+func performIrregularBranchPattern(rng RandomGenerator, testResult *BranchTestResult, operationCount *uint64) {
+	// 建立隨機但複雜的分支模式
+	for i := 0; i < 1000; i++ {
+		x := rng.Intn(1000)
+		
+		// 故意設計難以預測的分支
+		switch {
+		case isPrime(x) && x%4 == 1:
+			atomic.AddInt64(&testResult.Sum, int64(x*x))
+		case !isPrime(x) && x%3 == 0:
+			atomic.AddInt64(&testResult.XorResult, int64(x)^0xFF)
+		case x > 500 && x%7 != 0:
+			atomic.AddInt64(&testResult.Sum, int64(x>>1))
+		case x < 100 || (x > 200 && x < 300):
+			atomic.AddInt64(&testResult.XorResult, int64(x<<1))
+		default:
+			atomic.AddInt64(&testResult.Sum, int64(x*3+1))
+		}
+		
+		atomic.AddUint64(operationCount, 1)
+	}
+}
+
+// 簡單的質數檢查（用於增加分支複雜度）
+func isPrime(n int) bool {
+	if n < 2 {
+		return false
+	}
+	if n == 2 {
+		return true
+	}
+	if n%2 == 0 {
+		return false
+	}
+	
+	for i := 3; i*i <= n; i += 2 {
+		if n%i == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// 更新性能統計
+func updatePerfStats(perfStats *config.PerformanceStats, operationCount uint64, testResult *BranchTestResult, errorCount uint64) {
+	perfStats.Lock()
+	defer perfStats.Unlock()
+
+	perfStats.CPU.BranchCount += operationCount
+}
+
+// runCryptoStressParallel 執行高強度加密壓力測試
+func runCryptoStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- string, cpuID int, perfStats *config.PerformanceStats, debug bool, loadLevel string, duration time.Duration) {
     startTime := time.Now()
     operationCount := uint64(0)
-
-    const blockSize = 1024 * 1024
-    baseBatchSize := 10000
+    const blockSize = 2 * 1024 * 1024 // 增加到2MB提升壓力
+    baseBatchSize := 20000 // 增加批次大小
     batchSize := adjustBatchSize(baseBatchSize, loadLevel)
 
     rng := utils.NewRand(int64(cpuID))
     data := make([]byte, blockSize)
     _, err := rng.Read(data)
     if err != nil {
-        errorChan <- fmt.Sprintf("Random data generation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] random data generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("Random data generation failed on CPU %d", cpuID)
         return
     }
 
-    rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+    // RSA 密鑰對 (提升到4096位元增加運算負荷)
+    rsaKey, err := rsa.GenerateKey(rand.Reader, 4096)
     if err != nil {
-        errorChan <- fmt.Sprintf("RSA key generation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] RSA key generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("RSA key generation failed on CPU %d", cpuID)
         return
     }
 
+    // AES-256 設定
     aesKey := make([]byte, 32)
     _, err = rng.Read(aesKey)
     if err != nil {
-        errorChan <- fmt.Sprintf("AES key generation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] AES key generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("AES key generation failed on CPU %d", cpuID)
         return
     }
     aesCipher, err := aes.NewCipher(aesKey)
     if err != nil {
-        errorChan <- fmt.Sprintf("AES cipher creation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] AES cipher creation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("AES cipher creation failed on CPU %d", cpuID)
         return
     }
     gcm, err := cipher.NewGCM(aesCipher)
     if err != nil {
-        errorChan <- fmt.Sprintf("GCM creation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] GCM creation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("GCM creation failed on CPU %d", cpuID)
         return
     }
     nonce := make([]byte, gcm.NonceSize())
-    _, err = rng.Read(nonce)
+
+    // ECDSA P-384 (比P-256更耗運算資源)
+    ecdsaKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
     if err != nil {
-        errorChan <- fmt.Sprintf("Nonce generation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ECDSA key generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("ECDSA key generation failed on CPU %d", cpuID)
         return
     }
 
-    ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+    // Ed25519 密鑰對
+    ed25519Pub, ed25519Priv, err := ed25519.GenerateKey(rand.Reader)
     if err != nil {
-        errorChan <- fmt.Sprintf("ECDSA key generation failed on CPU %d: %v", cpuID, err)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Ed25519 key generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("Ed25519 key generation failed on CPU %d", cpuID)
         return
     }
 
-    var expectedHash [32]byte
+    // ChaCha20Poly1305 設定
+    chachaKey := make([]byte, 32)
+    _, err = rng.Read(chachaKey)
+    if err != nil {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ChaCha20 key generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("ChaCha20 key generation failed on CPU %d", cpuID)
+        return
+    }
+    chachaCipher, err := chacha20poly1305.New(chachaKey)
+    if err != nil {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ChaCha20Poly1305 creation failed on CPU %d: %v", mainPID, cpuID, err), false)
+        errorChan <- fmt.Sprintf("ChaCha20Poly1305 creation failed on CPU %d", cpuID)
+        return
+    }
+
+    // 驗證用的預期值
+    var expectedSHA256Hash [32]byte
+    var expectedSHA512Hash [64]byte
+    var expectedBlake2bHash [64]byte
     var errorDetected bool
+    validationData := make([]byte, 4096) // 專用於驗證的資料
+    copy(validationData, data[:4096])
 
     for time.Since(startTime) < duration {
         select {
         case <-stop:
+            perfStats.Lock()
+            perfStats.CPU.CryptoCount += operationCount
+            perfStats.Unlock()
+            if debug {
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] crypto test stopped on CPU %d", mainPID, cpuID), true)
+            }
             return
         default:
-            var hash [32]byte
-            for i := 0; i < batchSize; i++ {
-                hash = sha256.Sum256(data)
-                rsaHash := sha256.Sum256(data)
-                _, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, rsaHash[:])
+            var sha256Hash [32]byte
+            var sha512Hash [64]byte
+            var blake2bHash [64]byte
+
+            for i := 0; i < batchSize && !errorDetected; i++ {
+                // 1. 多種雜湊算法並行運算增加負荷
+                sha256Hash = sha256.Sum256(data)
+                sha512Hash = sha512.Sum512(data)
+
+                blake2b, err := blake2b.New512(nil)
                 if err != nil {
-                    errorChan <- fmt.Sprintf("RSA sign failed on CPU %d: %v", cpuID, err)
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Blake2b creation failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("Blake2b creation failed on CPU %d", cpuID)
                     errorDetected = true
                     break
                 }
-                ciphertext := gcm.Seal(nil, nonce, data[:1024], nil)
+                blake2b.Write(data)
+                copy(blake2bHash[:], blake2b.Sum(nil))
+
+                // 2. RSA 簽名與驗證
+                rsaHash := sha256.Sum256(data[:2048])
+                rsaSignature, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, rsaHash[:])
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] RSA sign failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("RSA sign failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+                // RSA 驗證
+                err = rsa.VerifyPKCS1v15(&rsaKey.PublicKey, crypto.SHA256, rsaHash[:], rsaSignature)
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] RSA verify failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("RSA verify failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+
+                // 3. AES-GCM 加密與解密
+                _, err = rng.Read(nonce)
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] nonce generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("Nonce generation failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+                ciphertext := gcm.Seal(nil, nonce, data[:2048], nil)
                 if len(ciphertext) == 0 {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] AES encryption failed on CPU %d", mainPID, cpuID), false)
                     errorChan <- fmt.Sprintf("AES encryption failed on CPU %d", cpuID)
                     errorDetected = true
                     break
                 }
-                ecdsaHash := sha256.Sum256(data)
-                _, _, err = ecdsa.Sign(rand.Reader, ecdsaKey, ecdsaHash[:])
-                if err != nil {
-                    errorChan <- fmt.Sprintf("ECDSA sign failed on CPU %d: %v", cpuID, err)
+                // AES 解密驗證
+                plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+                if err != nil || !bytes.Equal(plaintext, data[:2048]) {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] AES decryption verification failed on CPU %d", mainPID, cpuID), false)
+                    errorChan <- fmt.Sprintf("AES decryption verification failed on CPU %d", cpuID)
                     errorDetected = true
                     break
                 }
-                data[0] = hash[0]
-            }
-            operationCount += uint64(batchSize)
 
-            if operationCount == uint64(batchSize) {
-                expectedHash = hash
-            } else if !errorDetected && hash != expectedHash {
-                errorChan <- fmt.Sprintf("Crypto stress error on CPU %d: SHA-256 hash mismatch", cpuID)
-                errorDetected = true
+                // 4. ChaCha20Poly1305 加密與解密
+                chachaNonce := make([]byte, chachaCipher.NonceSize())
+                _, err = rng.Read(chachaNonce)
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ChaCha nonce generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("ChaCha nonce generation failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+                chachaCiphertext := chachaCipher.Seal(nil, chachaNonce, data[:2048], nil)
+                chachaPlaintext, err := chachaCipher.Open(nil, chachaNonce, chachaCiphertext, nil)
+                if err != nil || !bytes.Equal(chachaPlaintext, data[:2048]) {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ChaCha20 encryption/decryption failed on CPU %d", mainPID, cpuID), false)
+                    errorChan <- fmt.Sprintf("ChaCha20 encryption/decryption failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+
+                // 5. ECDSA 簽名與驗證
+                ecdsaHash := sha256.Sum256(data[:1024])
+                ecdsaR, ecdsaS, err := ecdsa.Sign(rand.Reader, ecdsaKey, ecdsaHash[:])
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ECDSA sign failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("ECDSA sign failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+                // ECDSA 驗證
+                if !ecdsa.Verify(&ecdsaKey.PublicKey, ecdsaHash[:], ecdsaR, ecdsaS) {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] ECDSA verify failed on CPU %d", mainPID, cpuID), false)
+                    errorChan <- fmt.Sprintf("ECDSA verify failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+
+                // 6. Ed25519 簽名與驗證
+                ed25519Signature := ed25519.Sign(ed25519Priv, data[:512])
+                if !ed25519.Verify(ed25519Pub, data[:512], ed25519Signature) {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Ed25519 verify failed on CPU %d", mainPID, cpuID), false)
+                    errorChan <- fmt.Sprintf("Ed25519 verify failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+
+                // 7. PBKDF2 密鑰衍生 (高 CPU 消耗)
+                salt := make([]byte, 16)
+                _, err = rng.Read(salt)
+                if err != nil {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] salt generation failed on CPU %d: %v", mainPID, cpuID, err), false)
+                    errorChan <- fmt.Sprintf("Salt generation failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+                derivedKey := pbkdf2.Key(data[:32], salt, 10000, 32, sha256.New)
+                if len(derivedKey) != 32 {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] PBKDF2 key derivation failed on CPU %d", mainPID, cpuID), false)
+                    errorChan <- fmt.Sprintf("PBKDF2 key derivation failed on CPU %d", cpuID)
+                    errorDetected = true
+                    break
+                }
+
+                // 8. 更新資料以增加變化
+                data[i%blockSize] ^= sha256Hash[0]
+                data[(i*2)%blockSize] ^= sha512Hash[0]
+                data[(i*3)%blockSize] ^= blake2bHash[0]
+
+                operationCount++
+            }
+
+            // 驗證機制：使用固定資料進行一致性檢查
+            if operationCount == uint64(batchSize) && !errorDetected {
+                expectedSHA256Hash = sha256.Sum256(validationData)
+                expectedSHA512Hash = sha512.Sum512(validationData)
+                blake2bHasher, _ := blake2b.New512(nil)
+                blake2bHasher.Write(validationData)
+                copy(expectedBlake2bHash[:], blake2bHasher.Sum(nil))
+            } else if operationCount > uint64(batchSize) && !errorDetected {
+                // 定期驗證固定資料的雜湊值是否一致
+                currentSHA256 := sha256.Sum256(validationData)
+                currentSHA512 := sha512.Sum512(validationData)
+                blake2bHasher, _ := blake2b.New512(nil)
+                blake2bHasher.Write(validationData)
+                var currentBlake2b [64]byte
+                copy(currentBlake2b[:], blake2bHasher.Sum(nil))
+
+                if currentSHA256 != expectedSHA256Hash || currentSHA512 != expectedSHA512Hash || currentBlake2b != expectedBlake2bHash {
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] crypto consistency verification failed on CPU %d", mainPID, cpuID), false)
+                    if debug {
+                        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] hash consistency check failed on CPU %d", mainPID, cpuID), true)
+                    }
+                    errorChan <- fmt.Sprintf("Crypto consistency verification failed on CPU %d", cpuID)
+                    errorDetected = true
+                }
+            }
+
+            if errorDetected {
+                break
             }
         }
     }
 
-    elapsed := time.Since(startTime)
-    if elapsed > 0 {
-        opsPerSecond := float64(operationCount) / elapsed.Seconds()
-        const opsPerFlop = 5000
-        gflopsEquivalent := (opsPerSecond * opsPerFlop) / 1e9
+    perfStats.Lock()
+    perfStats.CPU.CryptoCount += operationCount
+    perfStats.Unlock()
 
-        perfStats.Lock()
-        perfStats.CPU.CryptoOPS = (perfStats.CPU.CryptoOPS + opsPerSecond/1e9) / 2
-        perfStats.CPU.CryptoGFLOPS[cpuID] = (perfStats.CPU.CryptoGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CoreGFLOPS[cpuID] = (perfStats.CPU.CoreGFLOPS[cpuID] + gflopsEquivalent) / 2
-        perfStats.CPU.CryptoCount += operationCount
-        perfStats.Unlock()
-
-        if debug {
-            utils.LogMessage(fmt.Sprintf("CPU %d crypto perf: %.2f GOPS (%.2f GFLOPS equiv), operations: %d", cpuID, opsPerSecond/1e9, gflopsEquivalent, operationCount), debug)
-        }
+    if debug {
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d crypto operations completed: %d", mainPID, cpuID, operationCount), true)
     }
 }

@@ -24,7 +24,8 @@ type Config struct {
 type TestResult struct {
     CPU  string
     DIMM string
-    HDD  string
+	Mountpoint    map[string]string
+	RawDisk       map[string]string
 }
 
 // PerformanceStats tracks overall performance metrics
@@ -48,6 +49,7 @@ func (ps *PerformanceStats) Unlock() {
 
 // CPUPerformance tracks CPU performance metrics
 type CPUPerformance struct {
+    /*
     GFLOPS         float64        // Total GFLOPS
     CoreGFLOPS     map[int]float64 // Per-core GFLOPS
     IntegerOPS     float64        // Integer operations performance
@@ -56,6 +58,7 @@ type CPUPerformance struct {
     CacheOPS      float64 // GOPS
     BranchOPS     float64 // GOPS
     CryptoOPS     float64 // GOPS
+	*/
     NumCores       int            // Number of active cores
     CacheInfo      CacheInfo      // Cache information
     IntegerCount   uint64         // Integer test operation count
@@ -64,12 +67,14 @@ type CPUPerformance struct {
     CacheCount     uint64         // Cache test operation count
     BranchCount    uint64         // Branch test operation count
     CryptoCount    uint64         // Crypto test operation count
+	/*
     IntegerGFLOPS map[int]float64      // Integer GFLOPS per core
     FloatGFLOPS   map[int]float64      // Float GFLOPS per core
     VectorGFLOPS  map[int]float64      // Vector GFLOPS per core
     CacheGFLOPS   map[int]float64      // Cache GFLOPS per core
     BranchGFLOPS  map[int]float64      // Branch GFLOPS per core
     CryptoGFLOPS  map[int]float64      // Crypto GFLOPS per core
+	*/
 }
 
 // CacheInfo stores the sizes of L1, L2, and L3 caches

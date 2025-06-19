@@ -117,8 +117,8 @@ func main() {
         fmt.Println("- Use -print or -list to view available system resources.")
         fmt.Println("- Use -scan to update config.json with system resources.")
         fmt.Println("- Raw disk tests (-disk) require 'sequential' or 'random' mode; 'both' is not supported.")
-		fmt.Println("")
-		fmt.Println("- Due to all tests will need memory size, so if you run all tests, the memory usage must be 80% as well.")
+        fmt.Println("")
+        fmt.Println("- Due to all tests will need memory size, so if you run all tests, the memory usage must be 80% as well.")
         return
     }
 
@@ -300,7 +300,7 @@ func main() {
         cpuLoad = "Default"
     }
 
-	var testModes []string
+    var testModes []string
     if len(rawDiskPaths) > 0 && testMode == "both" {
         utils.LogMessage("Invalid test mode: both, using sequential", true)
         testModes = []string{"sequential"}
@@ -361,13 +361,12 @@ func main() {
     // 初始化 perfStats
     perfStats := &cfg.PerformanceStats{
         CPU: cfg.CPUPerformance{
-            CoreGFLOPS:      make(map[int]float64),
-            IntegerGFLOPS:   make(map[int]float64),
-            FloatGFLOPS:     make(map[int]float64),
-            VectorGFLOPS:    make(map[int]float64),
-            CacheGFLOPS:     make(map[int]float64),
-            BranchGFLOPS:    make(map[int]float64),
-            CryptoGFLOPS:    make(map[int]float64),
+            IntegerCount: 0,
+            FloatCount:   0,
+            VectorCount:  0,
+            CacheCount:   0,
+            BranchCount:  0,
+            CryptoCount:  0,
         },
         Memory:  cfg.MemoryPerformance{},
         Disk:    []cfg.DiskPerformance{},
@@ -381,8 +380,23 @@ func main() {
     results := cfg.TestResult{
         CPU:  "PASS",
         DIMM: "PASS",
-        HDD:  "PASS",
+                Mountpoint: make(map[string]string),
+                RawDisk:    make(map[string]string),
     }
+
+    mounts := []string{}
+        if mountPoints != "" {
+        for _, mount := range strings.Split(mountPoints, ",") {
+            if mount != "" { // 過濾空字串
+                mounts = append(mounts, mount)
+                results.Mountpoint[mount] = "PASS"
+                        }
+                }
+        }
+
+        for _, disk := range rawDiskPaths {
+        results.RawDisk[disk] = "PASS"
+        }
 
     errorDetails := make(map[string][]string)
 
@@ -420,7 +434,6 @@ func main() {
     }
 
     // 掛載點磁碟測試
-    var mounts []string
     if mountPoints != "" {
         mounts = strings.Split(mountPoints, ",")
         utils.LogMessage(fmt.Sprintf("Starting disk tests on mount points: %v", mounts), debug)
@@ -543,107 +556,118 @@ func main() {
     }
 
     // 錯誤處理和進度更新
-    go func() {
+        go func() {
         for err := range errorChan {
-            if err == "" {
+                    if err == "" {
                 continue
-            }
+                        }
 
-            if strings.Contains(err, "Test mode 'both' is not supported") {
+                        if strings.Contains(err, "Test mode 'both' is not supported") {
                 fmt.Println(err)
-                os.Exit(1)
-            }
+                                os.Exit(1)
+                        }
+                        switch {
+                            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") ||
+                                     strings.Contains(err, "Vector") || strings.Contains(err, "Cache") ||
+                                         strings.Contains(err, "Crypto"):
+                                        results.CPU = "FAIL"
+                                         errorDetails["CPU"] = append(errorDetails["CPU"], err)
+                                case strings.Contains(err, "Memory"):
+                                    results.DIMM = "FAIL"
+                                        errorDetails["DIMM"] = append(errorDetails["DIMM"], err)
+                                case strings.Contains(err, "Disk"):
+                                    for _, mount := range mounts {
+                                            if strings.Contains(err, mount) {
+                                                    results.Mountpoint[mount] = "FAIL"
+                                                        errorDetails["Mountpoint_"+mount] = append(errorDetails["Mountpoint_"+mount], err)
+                                                }
+                                        }
+                                case strings.Contains(err, "RawDisk"):
+                                    for _, disk := range rawDiskPaths {
+                                            if strings.Contains(err, disk) {
+                                                    results.RawDisk[disk] = "FAIL"
+                                                        errorDetails["RawDisk_"+disk] = append(errorDetails["RawDisk_"+disk], err)
+                                                }
+                                        }
+                        }
+                        utils.LogMessage(fmt.Sprintf("Error detected: %s", err), debug)
+                }
+        }()
 
-            switch {
-            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") || strings.Contains(err, "Vector") || strings.Contains(err, "Cache") || strings.Contains(err, "Crypto"):
-                results.CPU = "FAIL"
-                errorDetails["CPU"] = append(errorDetails["CPU"], err)
-            case strings.Contains(err, "Memory"):
-                results.DIMM = "FAIL"
-                errorDetails["DIMM"] = append(errorDetails["DIMM"], err)
-            case strings.Contains(err, "Disk") || strings.Contains(err, "RawDisk"):
-                results.HDD = "FAIL"
-                errorDetails["HDD"] = append(errorDetails["HDD"], err)
-            }
-
-            utils.LogMessage(fmt.Sprintf("Error detected: %s", err), debug)
-        }
-    }()
-
-	progressTicker := time.NewTicker(120 * time.Second)
-	go func() {
+    // 進度更新
+    progressTicker := time.NewTicker(120 * time.Second)
+    // 記錄上一次的計數
+    var lastIntegerCount, lastFloatCount, lastVectorCount, lastCacheCount, lastBranchCount, lastCryptoCount uint64
+    go func() {
         for {
             select {
             case <-progressTicker.C:
                 perfStats.Lock()
-                integerGFLOPS := 0.0
-				floatGFLOPS := 0.0
-				vectorGFLOPS := 0.0
-				cacheGFLOPS := 0.0
-				branchGFLOPS := 0.0
-				cryptoGFLOPS := 0.0
-                for cpuID := 0; cpuID < perfStats.CPU.NumCores; cpuID++ {
-				    integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
-					floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
-					vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
-					cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
-					branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
-					cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
-				}
-				memRead := perfStats.Memory.ReadSpeed
-				memWrite := perfStats.Memory.WriteSpeed
-				memRand := perfStats.Memory.RandomAccessSpeed
-				var bestDiskRead, bestDiskWrite float64
-				var bestDiskMount string
-				for _, disk := range perfStats.Disk {
-                    if disk.ReadSpeed > bestDiskRead {
-                        bestDiskRead = disk.ReadSpeed
-						bestDiskMount = disk.MountPoint
-					}
-					if disk.WriteSpeed > bestDiskWrite {
-                        bestDiskWrite = disk.WriteSpeed
-					}
-				}
-				var bestRawDiskRead, bestRawDiskWrite float64
-				var bestRawDiskDevice string
-				for _, rawDisk := range perfStats.RawDisk {
-                    if rawDisk.ReadSpeed > bestRawDiskRead {
-					    bestRawDiskRead = rawDisk.ReadSpeed
-						bestRawDiskDevice = rawDisk.DevicePath
-					}
-					if rawDisk.WriteSpeed > bestRawDiskWrite {
-					    bestRawDiskWrite = rawDisk.WriteSpeed
-					}
-				}
-				perfStats.Unlock()
+                // 計算差值
+                deltaInteger := perfStats.CPU.IntegerCount - lastIntegerCount
+                deltaFloat := perfStats.CPU.FloatCount - lastFloatCount
+                deltaVector := perfStats.CPU.VectorCount - lastVectorCount
+                deltaCache := perfStats.CPU.CacheCount - lastCacheCount
+                deltaBranch := perfStats.CPU.BranchCount - lastBranchCount
+                deltaCrypto := perfStats.CPU.CryptoCount - lastCryptoCount
 
-                var progressMsg string
-				if testCPU {
-                    progressMsg = fmt.Sprintf("Progress update - CPU (Int: %.2f, Float: %.2f, Vec: %.2f, Cache: %.2f, Branch: %.2f, Crypto: %.2f)",
-                        integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS)
-				} else {
-					progressMsg = "Progress update"
-				}
+                // 更新上次計數
+                lastIntegerCount = perfStats.CPU.IntegerCount
+                lastFloatCount = perfStats.CPU.FloatCount
+                lastVectorCount = perfStats.CPU.VectorCount
+                lastCacheCount = perfStats.CPU.CacheCount
+                lastBranchCount = perfStats.CPU.BranchCount
+                lastCryptoCount = perfStats.CPU.CryptoCount
 
+                progressMsg := "Progress update"
+                if testCPU {
+                    progressMsg += fmt.Sprintf(", CPU Operations: Integer=%s, Float=%s, Vector=%s, Cache=%s, Branch=%s, Crypto=%s",
+                        utils.FormatCount(deltaInteger), utils.FormatCount(deltaFloat), utils.FormatCount(deltaVector),
+                        utils.FormatCount(deltaCache), utils.FormatCount(deltaBranch), utils.FormatCount(deltaCrypto))
+                }
                 if memoryPercent > 0 {
-                    progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s Rand=%.2f MB/s", memRead, memWrite, memRand)
-				}
-				if len(mounts) > 0 {
+                    progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s Rand=%.2f MB/s",
+                        perfStats.Memory.ReadSpeed, perfStats.Memory.WriteSpeed, perfStats.Memory.RandomAccessSpeed)
+                }
+                if len(mounts) > 0 {
+                    var bestDiskRead, bestDiskWrite float64
+                    var bestDiskMount string
+                    for _, disk := range perfStats.Disk {
+                        if disk.ReadSpeed > bestDiskRead {
+                            bestDiskRead = disk.ReadSpeed
+                            bestDiskMount = disk.MountPoint
+                        }
+                        if disk.WriteSpeed > bestDiskWrite {
+                            bestDiskWrite = disk.WriteSpeed
+                        }
+                    }
                     progressMsg += fmt.Sprintf(", Disk(%s): R=%.2f MB/s W=%.2f MB/s",
                         bestDiskMount, bestDiskRead, bestDiskWrite)
-				}
-				if len(rawDiskPaths) > 0 {
-				    progressMsg += fmt.Sprintf(", RawDisk(%s): R=%.2f MB/s W=%.2f MB/s",
+                }
+                if len(rawDiskPaths) > 0 {
+                    var bestRawDiskRead, bestRawDiskWrite float64
+                    var bestRawDiskDevice string
+                    for _, rawDisk := range perfStats.RawDisk {
+                        if rawDisk.ReadSpeed > bestRawDiskRead {
+                            bestRawDiskRead = rawDisk.ReadSpeed
+                            bestRawDiskDevice = rawDisk.DevicePath
+                        }
+                        if rawDisk.WriteSpeed > bestRawDiskWrite {
+                            bestRawDiskWrite = rawDisk.WriteSpeed
+                        }
+                    }
+                    progressMsg += fmt.Sprintf(", RawDisk(%s): R=%.2f MB/s W=%.2f MB/s",
                         bestRawDiskDevice, bestRawDiskRead, bestRawDiskWrite)
-				}
-				utils.LogMessage(progressMsg, true)
+                }
+                perfStats.Unlock()
+                utils.LogMessage(progressMsg, true)
 
-			case <-stop:
-			    progressTicker.Stop()
-				return
-			}
-		}
-	}()
+            case <-stop:
+                progressTicker.Stop()
+                return
+            }
+        }
+    }()
 
     startTime := time.Now()
     time.Sleep(testDuration)
@@ -659,34 +683,15 @@ func main() {
         perfStats.Lock()
         cpuTotal := perfStats.CPU.IntegerCount + perfStats.CPU.FloatCount + perfStats.CPU.VectorCount +
             perfStats.CPU.CacheCount + perfStats.CPU.BranchCount + perfStats.CPU.CryptoCount
-        integerGFLOPS := 0.0
-        floatGFLOPS := 0.0
-        vectorGFLOPS := 0.0
-        cacheGFLOPS := 0.0
-        branchGFLOPS := 0.0
-        cryptoGFLOPS := 0.0
-        for cpuID := 0; cpuID < perfStats.CPU.NumCores; cpuID++ {
-            integerGFLOPS += perfStats.CPU.IntegerGFLOPS[cpuID]
-            floatGFLOPS += perfStats.CPU.FloatGFLOPS[cpuID]
-            vectorGFLOPS += perfStats.CPU.VectorGFLOPS[cpuID]
-            cacheGFLOPS += perfStats.CPU.CacheGFLOPS[cpuID]
-            branchGFLOPS += perfStats.CPU.BranchGFLOPS[cpuID]
-            cryptoGFLOPS += perfStats.CPU.CryptoGFLOPS[cpuID]
-        }
-        perfStats.Unlock()
-
-        utils.LogMessage(fmt.Sprintf("CPU Performance: %.2f GFLOPS (Load Level: %s)", perfStats.CPU.GFLOPS, cpuLoad), true)
-        utils.LogMessage(fmt.Sprintf("Per-Test GFLOPS: Integer=%.2f, Float=%.2f, Vector=%.2f, Cache=%.2f, Branch=%.2f, Crypto=%.2f",
-            integerGFLOPS, floatGFLOPS, vectorGFLOPS, cacheGFLOPS, branchGFLOPS, cryptoGFLOPS), true)
         utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
             perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
             perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
+        perfStats.Unlock()
         totalOperations += cpuTotal
     }
     if memoryPercent > 0 {
         memTotal := perfStats.Memory.WriteCount + perfStats.Memory.ReadCount + perfStats.Memory.RandomAccessCount
         perfStats.Lock()
-
         var avgReadSpeed, avgWriteSpeed, avgRandomAccessSpeed float64
         if perfStats.Memory.ReadSpeedCount > 0 {
             avgReadSpeed = perfStats.Memory.SumReadSpeed / float64(perfStats.Memory.ReadSpeedCount)
@@ -742,9 +747,12 @@ func main() {
     if memoryPercent > 0 {
         resultStr += fmt.Sprintf(" | DIMM: %s", results.DIMM)
     }
-    if len(mounts) > 0 || len(rawDiskPaths) > 0 {
-        resultStr += fmt.Sprintf(" | HDD: %s", results.HDD)
-    }
+        for mount, status := range results.Mountpoint {
+            resultStr += fmt.Sprintf(" | Mountpoint(%s): %s", mount, status)
+        }
+        for disk, status := range results.RawDisk {
+            resultStr += fmt.Sprintf(" | RawDisk(%s): %s", disk, status)
+        }
 
     for component, errors := range errorDetails {
         if len(errors) > 0 {
@@ -760,13 +768,12 @@ func main() {
 
     // 清空 perfStats 以釋放記憶體
     perfStats.Lock()
-    perfStats.CPU.CoreGFLOPS = nil
-    perfStats.CPU.IntegerGFLOPS = nil
-    perfStats.CPU.FloatGFLOPS = nil
-    perfStats.CPU.VectorGFLOPS = nil
-    perfStats.CPU.CacheGFLOPS = nil
-    perfStats.CPU.BranchGFLOPS = nil
-    perfStats.CPU.CryptoGFLOPS = nil
+    perfStats.CPU.IntegerCount = 0
+    perfStats.CPU.FloatCount = 0
+    perfStats.CPU.VectorCount = 0
+    perfStats.CPU.CacheCount = 0
+    perfStats.CPU.BranchCount = 0
+    perfStats.CPU.CryptoCount = 0
     perfStats.Disk = nil
     perfStats.RawDisk = nil
     perfStats.Unlock()
