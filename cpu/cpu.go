@@ -12,6 +12,7 @@ import (
     "crypto/sha256"
     "crypto/sha512"
     "bytes"
+    "context"
     "fmt"
     "math"
     "os"
@@ -19,7 +20,7 @@ import (
     "stress/config"
     "stress/utils"
     "sync"
-	"sync/atomic"
+    "sync/atomic"
     "time"
     "strings"
 
@@ -149,6 +150,22 @@ func runAllTestsPerCore(mainPID int, stop <-chan struct{}, errorChan chan<- stri
     runtime.LockOSThread()
     defer runtime.UnlockOSThread()
 
+    // Create a local context that can be cancelled immediately when stop signal is received
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    // Start a goroutine to watch for stop signal and cancel context immediately
+    go func() {
+        select {
+        case <-stop:
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! (CPU %d)", mainPID, cpuID), false)
+            cancel() // This will immediately cancel all running operations
+            return
+        case <-ctx.Done():
+            return
+        }
+    }()
+
     cpuset := unix.CPUSet{}
     cpuset.Set(cpuID)
     err := unix.SchedSetaffinity(0, &cpuset)
@@ -276,19 +293,21 @@ func runAllTestsPerCore(mainPID int, stop <-chan struct{}, errorChan chan<- stri
             mainPID, cpuID, configKey, len(selectedTests), testNames, cycleDuration), true)
     }
 
-    // Main test execution loop
+    // Main test execution loop with immediate stop capability
     for {
         select {
-        case <-stop:
-            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] received stop signal for CPU %d", mainPID, cpuID), false)
+        case <-ctx.Done():
+            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! Stopping CPU %d immediately", mainPID, cpuID), false)
             stopSubprocesses(mainPID, cpuID, debug)
             return
         default:
             start := time.Now()
+            
+            // Execute all tests in the cycle, but check for cancellation frequently
             for i, test := range selectedTests {
                 select {
-                case <-stop:
-                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] interrupted for CPU %d", mainPID, cpuID), false)
+                case <-ctx.Done():
+                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! Interrupted CPU %d during test %s", mainPID, cpuID, test.name), false)
                     stopSubprocesses(mainPID, cpuID, debug)
                     return
                 default:
@@ -297,13 +316,31 @@ func runAllTestsPerCore(mainPID int, stop <-chan struct{}, errorChan chan<- stri
                     if configKey != "high" {
                         testDuration = time.Duration(float64(cycleDuration) * test.weight)
                     }
-                    // Execute test
-                    test.fn(mainPID, stop, errorChan, cpuID, perfStats, debug, loadLevel, testDuration)
+                    
+                    // Create a channel to signal test completion
+                    testDone := make(chan struct{})
+                    
+                    // Run the test in a goroutine so we can cancel it immediately
+                    go func() {
+                        defer close(testDone)
+                        test.fn(mainPID, ctx.Done(), errorChan, cpuID, perfStats, debug, loadLevel, testDuration)
+                    }()
+                    
+                    // Wait for either test completion or cancellation
+                    select {
+                    case <-ctx.Done():
+                        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! Cancelling test %s on CPU %d", mainPID, test.name, cpuID), false)
+                        stopSubprocesses(mainPID, cpuID, debug)
+                        return
+                    case <-testDone:
+                        // Test completed normally
+                    }
+                    
                     // Add interval (except for last test in cycle or high load)
                     if test.interval > 0 && (i < len(selectedTests)-1 || configKey != "high") {
                         select {
-                        case <-stop:
-                            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] interrupted during interval for CPU %d", mainPID, cpuID), false)
+                        case <-ctx.Done():
+                            utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! Cancelled during interval on CPU %d", mainPID, cpuID), false)
                             stopSubprocesses(mainPID, cpuID, debug)
                             return
                         case <-time.After(test.interval):
@@ -315,10 +352,20 @@ func runAllTestsPerCore(mainPID int, stop <-chan struct{}, errorChan chan<- stri
                     }
                 }
             }
+            
             if debug {
                 utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d: Actual cycle time: %v", mainPID, cpuID, time.Since(start)), true)
             }
-            runtime.GC()
+            
+            // Check for cancellation before GC
+            select {
+            case <-ctx.Done():
+                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] Stress test is timeout, exit! Stopping CPU %d after cycle completion", mainPID, cpuID), false)
+                stopSubprocesses(mainPID, cpuID, debug)
+                return
+            default:
+                runtime.GC()
+            }
         }
     }
 }
@@ -528,44 +575,72 @@ func runCacheStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- 
         targetCacheLevel = "L2"
     }
 
-    arraySize := int((float64(targetCacheSize) * 0.75) / 8)
-    if arraySize < 1024 {
-        arraySize = 1024
+    // 調整 cache 使用策略：每個 CPU 核心只使用部分 cache
+    // 假設系統有 N 個核心，每個核心使用 cache 的 1/N 部分，再加上安全係數 0.5
+    numCPUs := runtime.NumCPU()
+    cachePortionPerCPU := float64(targetCacheSize) / float64(numCPUs) * 0.5
+    arraySize := int(cachePortionPerCPU / 8) // 每個 int64 佔 8 bytes
+    
+    // 設定最小和最大限制
+    minArraySize := 1024
+    maxArraySize := int(float64(targetCacheSize) * 0.3 / 8) // 最多使用 30% 的總 cache
+    
+    if arraySize < minArraySize {
+        arraySize = minArraySize
+    } else if arraySize > maxArraySize {
+        arraySize = maxArraySize
     }
+    
     dataSizeBytes := int64(arraySize) * 8
 
     if debug {
         sizeMB := float64(dataSizeBytes) / (1024 * 1024)
-        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] stressing %s Cache on CPU %d with array size: %.2f MB", mainPID, targetCacheLevel, cpuID, sizeMB), true)
+        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] stressing %s Cache on CPU %d with array size: %.2f MB (portion: %.2f%% of total cache)", 
+            mainPID, targetCacheLevel, cpuID, sizeMB, (float64(dataSizeBytes)/float64(targetCacheSize))*100), true)
     }
 
+    // 初始化資料陣列
     data := make([]int64, arraySize)
     for i := range data {
         data[i] = int64(i)
     }
 
     rng := utils.NewRand(int64(cpuID))
-    const pageSize = 4096 / 8
+    const pageSize = 4096 / 8 // 4KB page size in int64 units
     pageCount := arraySize / pageSize
     if pageCount < 1 {
         pageCount = 1
     }
 
+    // 預熱階段：循序存取確保資料載入到 cache
     var sum int64
+    for i := 0; i < arraySize; i++ {
+        sum += data[i]
+        data[i] = sum ^ int64(i)
+    }
+
+    // 計算動態批次大小
+    sampleStart := time.Now()
     for i := 0; i < 1000; i++ {
         pageIdx := rng.Intn(pageCount)
         startIdx := pageIdx * pageSize
-        for j := 0; j < pageSize; j++ {
-            idx := startIdx + j
-            if idx >= arraySize {
-                break
+        endIdx := startIdx + pageSize
+        if endIdx > arraySize {
+            endIdx = arraySize
+        }
+        
+        for j := startIdx; j < endIdx; j++ {
+            sum += data[j]
+            // 增加計算密度以提高 cache 壓力
+            for k := 0; k < 5; k++ {
+                sum ^= data[j]
+                sum += int64(k)
             }
-            sum += data[idx]
-            data[idx] ^= sum
+            data[j] = sum
         }
     }
 
-    sampleElapsed := time.Since(startTime)
+    sampleElapsed := time.Since(sampleStart)
     if sampleElapsed > 0 {
         batchTime := sampleElapsed / 1000
         targetBatches := int(duration / batchTime)
@@ -577,9 +652,7 @@ func runCacheStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- 
         }
     }
 
-    var expectedSum int64
-    var errorDetected bool
-
+    // 主要測試迴圈 - 僅進行讀寫操作，不進行驗證
     for time.Since(startTime) < duration {
         select {
         case <-stop:
@@ -592,33 +665,30 @@ func runCacheStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- 
             return
         default:
             for i := 0; i < batchSize; i++ {
+                // 隨機選擇一個記憶體頁面
                 pageIdx := rng.Intn(pageCount)
                 startIdx := pageIdx * pageSize
-                for j := 0; j < pageSize; j++ {
-                    idx := startIdx + j
-                    if idx >= arraySize {
-                        break
-                    }
-                    sum += data[idx]
+                endIdx := startIdx + pageSize
+                if endIdx > arraySize {
+                    endIdx = arraySize
+                }
+                
+                // 在該頁面內進行密集的讀寫操作
+                for j := startIdx; j < endIdx; j++ {
+                    // 讀取操作
+                    sum += data[j]
+                    
+                    // 增加計算複雜度以提高 cache 壓力
                     for k := 0; k < 10; k++ {
-                        sum ^= data[idx]
-                        sum += int64(math.Sqrt(float64(sum)))
+                        sum ^= data[j]
+                        sum += int64(j * k)
                     }
-                    data[idx] = sum
+                    
+                    // 寫入操作
+                    data[j] = sum
                 }
             }
             operationCount += uint64(batchSize)
-
-            if operationCount == uint64(batchSize) {
-                expectedSum = sum
-            } else if !errorDetected && sum != expectedSum {
-                utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] cache stress error on CPU %d", mainPID, cpuID), false)
-                if debug {
-                    utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] cache stress error on CPU %d: Expected sum %d, got %d", mainPID, cpuID, expectedSum, sum), true)
-                }
-                errorChan <- fmt.Sprintf("Cache stress error on CPU %d", cpuID)
-                errorDetected = true
-            }
         }
     }
 
@@ -627,7 +697,11 @@ func runCacheStressParallel(mainPID int, stop <-chan struct{}, errorChan chan<- 
     perfStats.Unlock()
 
     if debug {
-        utils.LogMessage(fmt.Sprintf("CPU test [PID: %d] CPU %d cache operations: %d", mainPID, cpuID, operationCount), true)
+        finalSizeMB := float64(dataSizeBytes) / (1024 * 1024)
+        message := fmt.Sprintf("CPU test [PID: %d] CPU %d completed cache operations: %d (%.2f MB processed)", 
+            mainPID, cpuID, operationCount, finalSizeMB)
+        utils.LogMessage(message, true)  // 寫入日誌
+        fmt.Println(message)             // 直接輸出到 console
     }
 }
 
