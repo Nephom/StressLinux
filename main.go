@@ -70,7 +70,7 @@ func main() {
     flag.BoolVar(&scanFlag, "scan", false, "Scan system resources and update config.json")
     flag.Parse()
 
-    // 檢查是否有任何命令列參數
+    // Check if any command-line parameters are provided
     hasFlags := debugFlag || testCPU || cpuCores != 0 || cpuLoad != "" || memoryPercent != 0 ||
         mountPoints != "" || len(rawDiskPaths) > 0 || fileSize != "" || rawDiskStartOffset != "" ||
         blockSizes != "" || testMode != "" || numaNode != -1 || showHelp || printSystemInfo || scanFlag
@@ -78,7 +78,7 @@ func main() {
     var configuration cfg.Config
     var debug bool
 
-    // 只有在沒有命令列參數時才載入 config.json
+    // Load config.json only if no command-line parameters are provided
     if !hasFlags {
         var err error
         configuration, err = cfg.LoadConfig()
@@ -253,7 +253,7 @@ func main() {
             Block:          config.Block,
             BlockDesc:      "Comma-separated block sizes for disk and raw disk operations (supports K, M, G units)",
             Mode:           config.Mode,
-            ModeDesc:       "Test mode for disk and raw disk: sequential or random",
+            ModeDesc:       "Test mode for disk and random disk: sequential or random",
             NUMANode:       config.NUMANode,
             NUMANodeDesc:   "Test mode for NUMA Node, the -1 as default to test all nodes",
         }
@@ -269,11 +269,11 @@ func main() {
             os.Exit(1)
         }
 
-        utils.LogMessage("Successfully scanned system resources and updated config.json", true)
+        utils.LogMessage("Successfully scanned system resources and updated config.json", false)
         return
     }
 
-    // 驗證參數
+    // Validate parameters
     if memoryPercent != 0 {
         if memoryPercent < 0.1 || memoryPercent > 9.9 {
             utils.LogMessage(fmt.Sprintf("Error: -memory must be between 0.1 and 9.9, got %.1f", memoryPercent), true)
@@ -286,7 +286,7 @@ func main() {
         os.Exit(1)
     }
 
-    // 設置最終預設值
+    // Set final default values
     if fileSize == "" {
         fileSize = "10MB"
     }
@@ -318,7 +318,7 @@ func main() {
         }
     }
 
-    // 解析統一參數
+    // Parse unified parameters
     var fileSizeBytes, rawDiskStartOffsetBytes int64
     if fileSize != "" {
         size, err := utils.ParseSize(fileSize)
@@ -342,7 +342,7 @@ func main() {
         rawDiskStartOffsetBytes = 1024 * 1024 * 1024
     }
 
-    // 檢查是否請求了任何壓力測試
+    // Check if any stress test is requested
     if !testCPU && memoryPercent == 0 && mountPoints == "" && len(rawDiskPaths) == 0 && serverIPs == "" {
         fmt.Println("Error: At least one of -cpu, -memory, -l, -disk, or -net must be specified for stress testing.")
         fmt.Println("Use -h to see all options.")
@@ -355,10 +355,10 @@ func main() {
         testDuration = 10 * time.Minute
     }
 
-    utils.LogMessage(fmt.Sprintf("Starting stress test for %v...", testDuration), true)
-    utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), true)
+    utils.LogMessage(fmt.Sprintf("Starting stress test for %v...", testDuration), false)
+    utils.LogMessage(fmt.Sprintf("Debug mode: %v", debug), false)
 
-    // 初始化 perfStats
+    // Initialize perfStats
     perfStats := &cfg.PerformanceStats{
         CPU: cfg.CPUPerformance{
             IntegerCount: 0,
@@ -380,50 +380,50 @@ func main() {
     results := cfg.TestResult{
         CPU:  "PASS",
         DIMM: "PASS",
-                Mountpoint: make(map[string]string),
-                RawDisk:    make(map[string]string),
+        Mountpoint: make(map[string]string),
+        RawDisk:    make(map[string]string),
     }
 
     mounts := []string{}
-        if mountPoints != "" {
+    if mountPoints != "" {
         for _, mount := range strings.Split(mountPoints, ",") {
-            if mount != "" { // 過濾空字串
+            if mount != "" { // Filter empty strings
                 mounts = append(mounts, mount)
                 results.Mountpoint[mount] = "PASS"
-                        }
-                }
+            }
         }
+    }
 
-        for _, disk := range rawDiskPaths {
+    for _, disk := range rawDiskPaths {
         results.RawDisk[disk] = "PASS"
-        }
+    }
 
     errorDetails := make(map[string][]string)
 
-    // 記憶體測試
+    // Memory test
     if memoryPercent > 0 {
         memUsagePercent := memoryPercent / 10.0
         if memUsagePercent > 0.9 {
             memUsagePercent = 0.9
-            utils.LogMessage("Memory recommended usage capped at 90% for system stability", true)
+            utils.LogMessage("Memory recommended usage capped at 90% for system stability", false)
         }
 
         memConfig := memory.MemoryConfig{
             UsagePercent: memUsagePercent,
             Debug:        debug,
         }
-        utils.LogMessage(fmt.Sprintf("Starting memory stress test with %.1f%% of total memory...", memUsagePercent*100), debug)
+        utils.LogMessage(fmt.Sprintf("Starting memory stress test with %.1f%% of total memory...", memUsagePercent*100), false)
         wg.Add(1)
         go memory.RunMemoryStressTest(&wg, stop, errorChan, memConfig, perfStats)
     }
 
-    // 解析區塊大小
+    // Parse block sizes
     var blockSizeList []int64
     if blockSizes != "" {
         for _, bsStr := range strings.Split(blockSizes, ",") {
             bs, err := utils.ParseSize(bsStr)
             if err != nil {
-                utils.LogMessage(fmt.Sprintf("Invalid block size: %v, skipping", err), debug)
+                utils.LogMessage(fmt.Sprintf("Invalid block size: %v, skipping", err), true)
                 continue
             }
             blockSizeList = append(blockSizeList, bs)
@@ -433,22 +433,23 @@ func main() {
         blockSizeList = append(blockSizeList, 4*1024)
     }
 
-    // 掛載點磁碟測試
+    // Mount point disk tests
     if mountPoints != "" {
         mounts = strings.Split(mountPoints, ",")
-        utils.LogMessage(fmt.Sprintf("Starting disk tests on mount points: %v", mounts), debug)
+        utils.LogMessage(fmt.Sprintf("Starting disk tests on mount points: %v", mounts), false)
 
         for _, mode := range testModes {
             for _, bs := range blockSizeList {
                 bsDisplay := utils.FormatSize(bs)
                 utils.LogMessage(fmt.Sprintf("Starting %s disk test with file size %s and block size %s on %v...",
-                    mode, utils.FormatSize(fileSizeBytes), bsDisplay, mounts), debug)
+                    mode, utils.FormatSize(fileSizeBytes), bsDisplay, mounts), false)
 
                 diskConfig := disk.DiskTestConfig{
                     MountPoints: mounts,
                     FileSize:    fileSizeBytes,
                     TestMode:    mode,
                     BlockSize:   bs,
+                    NumFiles:    4, // Explicitly set to align with disk.go default
                 }
 
                 wg.Add(1)
@@ -457,7 +458,7 @@ func main() {
         }
     }
 
-    // 原始磁碟測試
+    // Raw disk tests
     if len(rawDiskPaths) > 0 {
         if os.Geteuid() != 0 {
             utils.LogMessage("Warning: Raw disk tests (-disk) typically require root privileges.", true)
@@ -475,12 +476,12 @@ func main() {
                 }
 
                 utils.LogMessage(fmt.Sprintf("Starting raw disk tests on %d devices: %v",
-                    len(rawDiskPaths), rawDiskPaths), debug)
+                    len(rawDiskPaths), rawDiskPaths), false)
                 utils.LogMessage(fmt.Sprintf("Test size: %s, Block size: %s, Mode: %s, Start offset: %s",
                     utils.FormatSize(fileSizeBytes),
                     utils.FormatSize(bs),
                     mode,
-                    utils.FormatSize(rawDiskStartOffsetBytes)), debug)
+                    utils.FormatSize(rawDiskStartOffsetBytes)), false)
 
                 wg.Add(1)
                 go rawdisk.RunRawDiskStressTest(&wg, stop, errorChan, rawDiskTestConfig, perfStats, debug, duration)
@@ -488,13 +489,13 @@ func main() {
         }
     }
 
-    // CPU 測試
+    // CPU test
     if testCPU {
         rand.Seed(time.Now().UnixNano())
 
         numaInfo, err := utils.GetNUMAInfo()
         if err != nil {
-            utils.LogMessage(fmt.Sprintf("Failed to get NUMA info: %v", err), debug)
+            utils.LogMessage(fmt.Sprintf("Failed to get NUMA info: %v", err), true)
             numaNode = -1
         }
 
@@ -507,7 +508,7 @@ func main() {
                 utils.LogMessage(fmt.Sprintf("NUMA node %d has no CPUs, falling back to all cores", numaNode), true)
                 numaNode = -1
             } else {
-                utils.LogMessage(fmt.Sprintf("NUMA node %d has CPUs: %v", numaNode, selectedCPUs), debug)
+                utils.LogMessage(fmt.Sprintf("NUMA node %d has CPUs: %v", numaNode, selectedCPUs), false)
                 if numCores > 0 && numCores > len(selectedCPUs) {
                     utils.LogMessage(fmt.Sprintf("Error: Requested %d cores, but NUMA node %d only has %d cores. Falling back to all cores.", cpuCores, numaNode, len(selectedCPUs)), true)
                     numaNode = -1
@@ -525,22 +526,22 @@ func main() {
             if numCores == 0 {
                 numCores = totalCores
                 selectedCPUs = allCPUs
-                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores: %v", numCores, selectedCPUs), debug)
+                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores: %v", numCores, selectedCPUs), false)
             } else if numCores > totalCores {
                 numCores = totalCores
                 selectedCPUs = allCPUs
                 utils.LogMessage(fmt.Sprintf("Requested %d cores, but only %d available. Using %d cores: %v", cpuCores, totalCores, numCores, selectedCPUs), true)
             } else {
                 selectedCPUs = randomSelectCores(allCPUs, numCores)
-                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores: %v", numCores, selectedCPUs), debug)
+                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores: %v", numCores, selectedCPUs), false)
             }
         } else {
             if numCores == 0 {
                 numCores = len(selectedCPUs)
-                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
+                utils.LogMessage(fmt.Sprintf("No CPU cores specified, using all %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), false)
             } else {
                 selectedCPUs = randomSelectCores(selectedCPUs, numCores)
-                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), debug)
+                utils.LogMessage(fmt.Sprintf("Randomly selected %d cores in NUMA node %d: %v", numCores, numaNode, selectedCPUs), false)
             }
         }
 
@@ -550,60 +551,66 @@ func main() {
             CPUList:    selectedCPUs,
             LoadLevel:  cpuLoad,
         }
-        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores (CPUs: %v) with load level: %s...", testConfig.NumCores, testConfig.CPUList, testConfig.LoadLevel), debug)
+        utils.LogMessage(fmt.Sprintf("Starting CPU stress tests using %d cores (CPUs: %v) with load level: %s...", testConfig.NumCores, testConfig.CPUList, testConfig.LoadLevel), false)
         wg.Add(1)
         go cpu.RunCPUStressTests(&wg, stop, errorChan, testConfig, perfStats)
     }
 
-    // 錯誤處理和進度更新
-        go func() {
+    // Error handling and progress updates
+    go func() {
         for err := range errorChan {
-                    if err == "" {
+            if err == "" {
                 continue
-                        }
-
-                        if strings.Contains(err, "Test mode 'both' is not supported") {
-                fmt.Println(err)
-                                os.Exit(1)
-                        }
-                        switch {
-                            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") ||
-                                     strings.Contains(err, "Vector") || strings.Contains(err, "Cache") ||
-                                         strings.Contains(err, "Crypto"):
-                                        results.CPU = "FAIL"
-                                         errorDetails["CPU"] = append(errorDetails["CPU"], err)
-                                case strings.Contains(err, "Memory"):
-                                    results.DIMM = "FAIL"
-                                        errorDetails["DIMM"] = append(errorDetails["DIMM"], err)
-                                case strings.Contains(err, "Disk"):
-                                    for _, mount := range mounts {
-                                            if strings.Contains(err, mount) {
-                                                    results.Mountpoint[mount] = "FAIL"
-                                                        errorDetails["Mountpoint_"+mount] = append(errorDetails["Mountpoint_"+mount], err)
-                                                }
-                                        }
-                                case strings.Contains(err, "RawDisk"):
-                                    for _, disk := range rawDiskPaths {
-                                            if strings.Contains(err, disk) {
-                                                    results.RawDisk[disk] = "FAIL"
-                                                        errorDetails["RawDisk_"+disk] = append(errorDetails["RawDisk_"+disk], err)
-                                                }
-                                        }
-                        }
-                        utils.LogMessage(fmt.Sprintf("Error detected: %s", err), debug)
+            }
+            // Skip context canceled errors, treat as normal shutdown
+            if strings.Contains(strings.ToLower(err), "context canceled") {
+                if debug {
+                    utils.LogMessage(fmt.Sprintf("Shutdown signal received: %s", err), true)
                 }
-        }()
+                continue
+            }
+            if strings.Contains(err, "Test mode 'both' is not supported") {
+                fmt.Println(err)
+                os.Exit(1)
+            }
+            switch {
+            case strings.Contains(err, "Integer") || strings.Contains(err, "Float") ||
+                strings.Contains(err, "Vector") || strings.Contains(err, "Cache") ||
+                strings.Contains(err, "Crypto"):
+                results.CPU = "FAIL"
+                errorDetails["CPU"] = append(errorDetails["CPU"], err)
+            case strings.Contains(err, "Memory"):
+                results.DIMM = "FAIL"
+                errorDetails["DIMM"] = append(errorDetails["DIMM"], err)
+            case strings.Contains(err, "Disk"):
+                for _, mount := range mounts {
+                    if strings.Contains(err, mount) {
+                        results.Mountpoint[mount] = "FAIL"
+                        errorDetails["Mountpoint_"+mount] = append(errorDetails["Mountpoint_"+mount], err)
+                    }
+                }
+            case strings.Contains(err, "RawDisk"):
+                for _, disk := range rawDiskPaths {
+                    if strings.Contains(err, disk) {
+                        results.RawDisk[disk] = "FAIL"
+                        errorDetails["RawDisk_"+disk] = append(errorDetails["RawDisk_"+disk], err)
+                    }
+                }
+            }
+            utils.LogMessage(fmt.Sprintf("Error detected: %s", err), true)
+        }
+    }()
 
-    // 進度更新
+    // Progress updates
     progressTicker := time.NewTicker(120 * time.Second)
-    // 記錄上一次的計數
+    // Record previous counts
     var lastIntegerCount, lastFloatCount, lastVectorCount, lastCacheCount, lastBranchCount, lastCryptoCount uint64
     go func() {
         for {
             select {
             case <-progressTicker.C:
                 perfStats.Lock()
-                // 計算差值
+                // Calculate deltas
                 deltaInteger := perfStats.CPU.IntegerCount - lastIntegerCount
                 deltaFloat := perfStats.CPU.FloatCount - lastFloatCount
                 deltaVector := perfStats.CPU.VectorCount - lastVectorCount
@@ -611,7 +618,7 @@ func main() {
                 deltaBranch := perfStats.CPU.BranchCount - lastBranchCount
                 deltaCrypto := perfStats.CPU.CryptoCount - lastCryptoCount
 
-                // 更新上次計數
+                // Update last counts
                 lastIntegerCount = perfStats.CPU.IntegerCount
                 lastFloatCount = perfStats.CPU.FloatCount
                 lastVectorCount = perfStats.CPU.VectorCount
@@ -629,38 +636,21 @@ func main() {
                     progressMsg += fmt.Sprintf(", Memory: R=%.2f MB/s W=%.2f MB/s Rand=%.2f MB/s",
                         perfStats.Memory.ReadSpeed, perfStats.Memory.WriteSpeed, perfStats.Memory.RandomAccessSpeed)
                 }
-                if len(mounts) > 0 {
-                    var bestDiskRead, bestDiskWrite float64
-                    var bestDiskMount string
-                    for _, disk := range perfStats.Disk {
-                        if disk.ReadSpeed > bestDiskRead {
-                            bestDiskRead = disk.ReadSpeed
-                            bestDiskMount = disk.MountPoint
-                        }
-                        if disk.WriteSpeed > bestDiskWrite {
-                            bestDiskWrite = disk.WriteSpeed
-                        }
-                    }
-                    progressMsg += fmt.Sprintf(", Disk(%s): R=%.2f MB/s W=%.2f MB/s",
-                        bestDiskMount, bestDiskRead, bestDiskWrite)
-                }
                 if len(rawDiskPaths) > 0 {
-                    var bestRawDiskRead, bestRawDiskWrite float64
+                    var totalRawDiskOps uint64
                     var bestRawDiskDevice string
                     for _, rawDisk := range perfStats.RawDisk {
-                        if rawDisk.ReadSpeed > bestRawDiskRead {
-                            bestRawDiskRead = rawDisk.ReadSpeed
+                        ops := rawDisk.WriteCount + rawDisk.ReadCount
+                        if ops > totalRawDiskOps {
+                            totalRawDiskOps = ops
                             bestRawDiskDevice = rawDisk.DevicePath
                         }
-                        if rawDisk.WriteSpeed > bestRawDiskWrite {
-                            bestRawDiskWrite = rawDisk.WriteSpeed
-                        }
                     }
-                    progressMsg += fmt.Sprintf(", RawDisk(%s): R=%.2f MB/s W=%.2f MB/s",
-                        bestRawDiskDevice, bestRawDiskRead, bestRawDiskWrite)
+                    progressMsg += fmt.Sprintf(", RawDisk(%s): Total Operations=%d",
+                        bestRawDiskDevice, totalRawDiskOps)
                 }
                 perfStats.Unlock()
-                utils.LogMessage(progressMsg, true)
+                utils.LogMessage(progressMsg, false)
 
             case <-stop:
                 progressTicker.Stop()
@@ -677,7 +667,7 @@ func main() {
 
     elapsedTime := time.Since(startTime)
 
-    utils.LogMessage("=== PERFORMANCE RESULTS ===", true)
+    utils.LogMessage("=== PERFORMANCE RESULTS ===", false)
     var totalOperations uint64
     if testCPU {
         perfStats.Lock()
@@ -685,7 +675,7 @@ func main() {
             perfStats.CPU.CacheCount + perfStats.CPU.BranchCount + perfStats.CPU.CryptoCount
         utils.LogMessage(fmt.Sprintf("CPU Operations: Integer=%d, Float=%d, Vector=%d, Cache=%d, Branch=%d, Crypto=%d, Total=%d",
             perfStats.CPU.IntegerCount, perfStats.CPU.FloatCount, perfStats.CPU.VectorCount,
-            perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), true)
+            perfStats.CPU.CacheCount, perfStats.CPU.BranchCount, perfStats.CPU.CryptoCount, cpuTotal), false)
         perfStats.Unlock()
         totalOperations += cpuTotal
     }
@@ -705,40 +695,34 @@ func main() {
         utils.LogMessage(fmt.Sprintf("Memory Performance - Read: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f), Write: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f), Random Access: %.2f MB/s (Min=%.2f, Max=%.2f, Avg=%.2f)",
             perfStats.Memory.ReadSpeed, perfStats.Memory.MinReadSpeed, perfStats.Memory.MaxReadSpeed, avgReadSpeed,
             perfStats.Memory.WriteSpeed, perfStats.Memory.MinWriteSpeed, perfStats.Memory.MaxWriteSpeed, avgWriteSpeed,
-            perfStats.Memory.RandomAccessSpeed, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed, avgRandomAccessSpeed), true)
+            perfStats.Memory.RandomAccessSpeed, perfStats.Memory.MinRandomAccessSpeed, perfStats.Memory.MaxRandomAccessSpeed, avgRandomAccessSpeed), false)
         utils.LogMessage(fmt.Sprintf("Memory Operations: Write=%d, Read=%d, Random Access=%d, Total=%d",
-            perfStats.Memory.WriteCount, perfStats.Memory.ReadCount, perfStats.Memory.RandomAccessCount, memTotal), true)
+            perfStats.Memory.WriteCount, perfStats.Memory.ReadCount, perfStats.Memory.RandomAccessCount, memTotal), false)
         perfStats.Unlock()
         totalOperations += memTotal
     }
     if len(mounts) > 0 {
-        var diskTotal uint64
-        utils.LogMessage("Disk Performance:", true)
+        utils.LogMessage("Mountpoint test:", false)
         for _, disk := range perfStats.Disk {
-            diskOps := disk.WriteCount + disk.ReadCount
-            utils.LogMessage(fmt.Sprintf("  Mount: %s, Mode: %s, Block: %s - Read: %.2f MB/s, Write: %.2f MB/s, Operations: Write=%d, Read=%d, Total=%d",
-                disk.MountPoint, disk.Mode, utils.FormatSize(disk.BlockSize), disk.ReadSpeed, disk.WriteSpeed,
-                disk.WriteCount, disk.ReadCount, diskOps), true)
-            diskTotal += diskOps
+            utils.LogMessage(fmt.Sprintf("  Mount: %s, Mode: %s, Block: %s",
+                disk.MountPoint, disk.Mode, utils.FormatSize(disk.BlockSize)), false)
         }
-        utils.LogMessage(fmt.Sprintf("Disk Total Operations: %d", diskTotal), true)
-        totalOperations += diskTotal
     }
     if len(rawDiskPaths) > 0 {
         var rawDiskTotal uint64
-        utils.LogMessage("Raw Disk Performance:", true)
+        utils.LogMessage("Raw Disk Operations:", false)
         for _, rawDisk := range perfStats.RawDisk {
             rawDiskOps := rawDisk.WriteCount + rawDisk.ReadCount
-            utils.LogMessage(fmt.Sprintf("  RawDisk: %s, Mode: %s, Block: %s - Read: %.2f MB/s, Write: %.2f MB/s, Operations: Write=%d, Read=%d, Total=%d",
-                rawDisk.DevicePath, rawDisk.Mode, utils.FormatSize(rawDisk.BlockSize), rawDisk.ReadSpeed, rawDisk.WriteSpeed,
-                rawDisk.WriteCount, rawDisk.ReadCount, rawDiskOps), true)
+            utils.LogMessage(fmt.Sprintf("  RawDisk: %s, Mode: %s, Block: %s - Operations: Write=%d, Read=%d, Total=%d",
+                rawDisk.DevicePath, rawDisk.Mode, utils.FormatSize(rawDisk.BlockSize),
+                rawDisk.WriteCount, rawDisk.ReadCount, rawDiskOps), false)
             rawDiskTotal += rawDiskOps
         }
-        utils.LogMessage(fmt.Sprintf("RawDisk Total Operations: %d", rawDiskTotal), true)
+        utils.LogMessage(fmt.Sprintf("RawDisk Total Operations: %d", rawDiskTotal), false)
         totalOperations += rawDiskTotal
     }
 
-    utils.LogMessage(fmt.Sprintf("Total Operations Across All Tests: %d", totalOperations), true)
+    utils.LogMessage(fmt.Sprintf("Total Operations Across All Tests without Disk: %d", totalOperations), false)
 
     resultStr := fmt.Sprintf("Stress Test Summary - Duration: %s", elapsedTime.Round(time.Second))
     if testCPU {
@@ -747,12 +731,12 @@ func main() {
     if memoryPercent > 0 {
         resultStr += fmt.Sprintf(" | DIMM: %s", results.DIMM)
     }
-        for mount, status := range results.Mountpoint {
-            resultStr += fmt.Sprintf(" | Mountpoint(%s): %s", mount, status)
-        }
-        for disk, status := range results.RawDisk {
-            resultStr += fmt.Sprintf(" | RawDisk(%s): %s", disk, status)
-        }
+    for mount, status := range results.Mountpoint {
+        resultStr += fmt.Sprintf(" | Mountpoint(%s): %s", mount, status)
+    }
+    for disk, status := range results.RawDisk {
+        resultStr += fmt.Sprintf(" | RawDisk(%s): %s", disk, status)
+    }
 
     for component, errors := range errorDetails {
         if len(errors) > 0 {
@@ -763,10 +747,10 @@ func main() {
         }
     }
 
-    utils.LogMessage(resultStr, true)
-    utils.LogMessage("Stress test completed!", true)
+    utils.LogMessage(resultStr, false)
+    utils.LogMessage("Stress test completed!", false)
 
-    // 清空 perfStats 以釋放記憶體
+    // Clear perfStats to free memory
     perfStats.Lock()
     perfStats.CPU.IntegerCount = 0
     perfStats.CPU.FloatCount = 0

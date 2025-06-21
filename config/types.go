@@ -17,7 +17,7 @@ type Config struct {
     Offset     string  `json:"Offset" description:"Start offset from the beginning of the raw device (e.g., 1G, 100M, supports K, M, G units)"`
     Block      string  `json:"Block" description:"Comma-separated block sizes for disk and raw disk operations (supports K, M, G units)"`
     Mode       string  `json:"Mode" description:"Test mode for mountpoint(sequential/random/both) and raw disk(Only sequential or random)"`
-	NUMANode   int     `json:"NUMANode" description: Test NUMA node, default is -1 means test all nodes."`
+    NUMANode   int     `json:"NUMANode" description: Test NUMA node, default is -1 means test all nodes."`
 }
 
 // TestResult structure
@@ -49,16 +49,6 @@ func (ps *PerformanceStats) Unlock() {
 
 // CPUPerformance tracks CPU performance metrics
 type CPUPerformance struct {
-    /*
-    GFLOPS         float64        // Total GFLOPS
-    CoreGFLOPS     map[int]float64 // Per-core GFLOPS
-    IntegerOPS     float64        // Integer operations performance
-    FloatOPS       float64        // Floating-point operations performance
-    VectorOPS      float64        // Vector operations performance
-    CacheOPS      float64 // GOPS
-    BranchOPS     float64 // GOPS
-    CryptoOPS     float64 // GOPS
-	*/
     NumCores       int            // Number of active cores
     CacheInfo      CacheInfo      // Cache information
     IntegerCount   uint64         // Integer test operation count
@@ -67,14 +57,6 @@ type CPUPerformance struct {
     CacheCount     uint64         // Cache test operation count
     BranchCount    uint64         // Branch test operation count
     CryptoCount    uint64         // Crypto test operation count
-	/*
-    IntegerGFLOPS map[int]float64      // Integer GFLOPS per core
-    FloatGFLOPS   map[int]float64      // Float GFLOPS per core
-    VectorGFLOPS  map[int]float64      // Vector GFLOPS per core
-    CacheGFLOPS   map[int]float64      // Cache GFLOPS per core
-    BranchGFLOPS  map[int]float64      // Branch GFLOPS per core
-    CryptoGFLOPS  map[int]float64      // Crypto GFLOPS per core
-	*/
 }
 
 // CacheInfo stores the sizes of L1, L2, and L3 caches
@@ -108,15 +90,10 @@ type MemoryPerformance struct {
 
 // DiskPerformance tracks disk performance metrics
 type DiskPerformance struct {
-    ReadSpeed  float64 // in MB/s
-    WriteSpeed float64 // in MB/s
-    RandomAccessSpeed float64
-    MountPoint string
-    Mode       string
-    BlockSize  int64
-    WriteCount uint64  // Write operation count
-    ReadCount  uint64  // Read operation count
-    RandomAccessCount uint64
+    MountPoint        string
+    Mode              string  // sequential or random
+    IOMode            string  // direct or async
+    BlockSize         int64
 }
 
 // RawDiskPerformance tracks raw disk performance metrics

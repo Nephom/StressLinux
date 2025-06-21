@@ -7,10 +7,11 @@ type DiskTestConfig struct {
     FileSize    int64
     TestMode    string
     BlockSize   int64
+    NumFiles    int
 }
 
 // DiskResult holds the results of disk tests
-type DiskResult struct {
+/*type DiskResult struct {
     Performances []struct {
         MountPoint string
         Mode       string
@@ -19,3 +20,4 @@ type DiskResult struct {
     }
     Errors []string
 }
+*/
